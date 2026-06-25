@@ -1,0 +1,14 @@
+# Common miner indicators
+xmrig
+minergate
+coinhive
+cryptonight
+cryptominer
+xmr-stak
+nicehash
+minerd
+cpuminer
+ccminer
+sgminer
+java -jar
+node --inspect

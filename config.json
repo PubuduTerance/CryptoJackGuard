@@ -1,0 +1,42 @@
+{
+  "high_cpu_threshold": 30.0,
+  "high_memory_threshold": 20.0,
+  "alert_threshold": 60.0,
+  "refresh_interval": 3.0,
+  "sustained_cycles": 2,
+  "suspicious_ports": [3333, 4444, 7777, 8080, 9090],
+  "suspicious_path_keywords": ["miner", "crypt", "coins", "xmr", "xmrig"],
+  "suspicious_cmd_indicators": [
+    "stratum",
+    "stratum+tcp",
+    "stratum+ssl",
+    "xmrig",
+    "randomx",
+    "rx/0",
+    "cn-heavy",
+    "--algo",
+    "--coin",
+    "--pool",
+    "--url",
+    "--user",
+    "--pass",
+    "donate-level"
+  ],
+  "safe_process_names": [
+    "system",
+    "system idle process",
+    "registry",
+    "smss.exe",
+    "csrss.exe",
+    "wininit.exe",
+    "services.exe",
+    "lsass.exe",
+    "svchost.exe",
+    "explorer.exe",
+    "chrome.exe",
+    "msedge.exe",
+    "code.exe",
+    "nvidia overlay.exe",
+    "killernetworkservice.exe"
+  ]
+}

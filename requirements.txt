@@ -1,0 +1,6 @@
+psutil
+rich
+typer
+pydantic
+requests
+GPUtil
