@@ -37,7 +37,11 @@ def score_process(
     memory_threshold = float(config.get('high_memory_threshold', 20.0))
     suspicious_ports = set(config.get('suspicious_ports', []))
     suspicious_path_keywords = set(config.get('suspicious_path_keywords', []))
-    suspicious_cmd_indicators = set(config.get('suspicious_cmd_indicators', []))
+    suspicious_cmd_indicators = list(config.get('suspicious_cmd_indicators', []))
+    # small CPU level to consider "non-trivial" CPU use when combined with
+    # suspicious indicators. This is intentionally low so CPU alone doesn't
+    # trigger high-risk alerts.
+    cpu_non_trivial = float(config.get('cpu_non_trivial_threshold', 10.0))
     safe_names = set(name.lower() for name in config.get('safe_process_names', []))
 
     name_lower = process.name.lower()
@@ -78,9 +82,31 @@ def score_process(
         score += 15.0
         reasons.append('suspicious binary path')
 
-    if cmdline_lower and any(keyword in cmdline_lower for keyword in suspicious_cmd_indicators):
-        score += 15.0
-        reasons.append('miner-like command line arguments')
+    # Count miner-like command line indicators. Use the configured list plus
+    # any external indicators provided. We report which indicators matched
+    # so the dashboard can show precise reasons.
+    combined_indicators = set(i.lower() for i in suspicious_cmd_indicators) | set(indicators)
+    matched = [ind for ind in combined_indicators if ind and ind in cmdline_lower]
+    matched_unique = sorted(set(matched))
+    num_matched = len(matched_unique)
+    if num_matched > 0:
+        if num_matched == 1:
+            score += 10.0
+            reasons.append(f'1 miner-like CLI indicator: {matched_unique}')
+        elif num_matched == 2:
+            score += 25.0
+            reasons.append(f'2 miner-like CLI indicators: {matched_unique}')
+        else:
+            score += 45.0
+            reasons.append(f'{num_matched} miner-like CLI indicators: {matched_unique}')
+
+        # If the process is also consuming non-trivial CPU, increase score
+        # modestly. This ensures processes that both look and behave like
+        # miners are higher risk while CPU-only workloads (no indicators)
+        # remain low-risk.
+        if normalized_cpu >= cpu_non_trivial:
+            score += 10.0
+            reasons.append(f'combined: miner-like args + CPU {normalized_cpu:.1f}%')
 
     if network_info:
         ports = set(network_info.local_ports)
@@ -100,6 +126,7 @@ def score_process(
             score += 25.0
             reasons.append('remote address matches mining IOC')
 
+    # Special-case softer scoring for python processes running miner tools.
     if name_lower == 'python.exe' and 'xmrig' in cmdline_lower:
         score += 10.0
         reasons.append('python process running miner-like tool')
