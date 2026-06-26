@@ -1,9 +1,11 @@
 from __future__ import annotations
+import argparse
 import json
 from pathlib import Path
 from time import monotonic, sleep
 from typing import Dict, Any
 
+import psutil
 from rich.console import Console, Group
 from rich.table import Table
 from rich.panel import Panel
@@ -21,6 +23,16 @@ from src.response.actions import action_description, list_safe_action_options
 
 CONFIG_PATH = Path('config.json')
 DATA_DIR = Path('data')
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description='CryptoJackGuard defensive monitoring tool')
+    parser.add_argument(
+        '--respond',
+        action='store_true',
+        help='Enable safe response mode and ask before terminating high-risk processes',
+    )
+    return parser.parse_args()
 
 
 def load_config() -> Dict[str, Any]:
@@ -73,12 +85,73 @@ def build_dashboard(resource, top_scores, indicators) -> Panel:
     return Panel(Group(resource_text, indicator_panel, dashboard), title='CryptoJackGuard Status')
 
 
+CRITICAL_PROCESS_NAMES = {
+    'explorer.exe',
+    'svchost.exe',
+    'wininit.exe',
+    'services.exe',
+    'lsass.exe',
+    'csrss.exe',
+    'smss.exe',
+    'winlogon.exe',
+    'code.exe',
+    'chrome.exe',
+    'msedge.exe',
+}
+CRITICAL_PROCESS_PIDS = {0, 4}
+
+
 def find_alerts(scores, threshold):
     return [score for score in scores if score.risk_score >= threshold]
 
 
+def is_critical_process(score) -> bool:
+    return score.pid in CRITICAL_PROCESS_PIDS or score.name.lower() in CRITICAL_PROCESS_NAMES
+
+
+def confirm_termination(score, console: Console, live) -> bool:
+    live.stop()
+    console.print('\n[bold yellow]Safe response mode:[/bold yellow] high-risk process detected')
+    console.print(f'  PID: {score.pid}')
+    console.print(f'  Name: {score.name}')
+    console.print(f'  Path: {score.path or "N/A"}')
+    console.print(f'  Score: {score.risk_score:.1f}')
+    reasons_text = ', '.join(score.reasons) if score.reasons else 'None'
+    console.print(f'  Reasons: {reasons_text}')
+    try:
+        answer = input("Type 'yes' to terminate this process, or anything else to keep it: ").strip().lower()
+    except (KeyboardInterrupt, EOFError):
+        console.print('[bold red]No response received. Keeping process.[/bold red]')
+        live.start()
+        return False
+    live.start()
+    return answer == 'yes'
+
+
+def terminate_process(score, console: Console) -> tuple[bool, str]:
+    try:
+        proc = psutil.Process(score.pid)
+        proc.terminate()
+        proc.wait(timeout=5)
+        console.print(f'[bold green]Process {score.pid} terminated successfully.[/bold green]')
+        return True, 'terminated'
+    except psutil.NoSuchProcess:
+        console.print(f'[bold yellow]Process {score.pid} no longer exists.[/bold yellow]')
+        return False, 'no such process'
+    except psutil.AccessDenied:
+        console.print(f'[bold red]Access denied when terminating process {score.pid}.[/bold red]')
+        return False, 'access denied'
+    except psutil.TimeoutExpired:
+        console.print(f'[bold yellow]Termination timed out for process {score.pid}.[/bold yellow]')
+        return False, 'timeout expired'
+    except Exception as exc:
+        console.print(f'[bold red]Failed to terminate process {score.pid}: {exc}[/bold red]')
+        return False, str(exc)
+
+
 def main() -> int:
     console = Console()
+    args = parse_args()
     config = load_config()
     indicators = load_mining_indicators(DATA_DIR / 'mining_iocs.txt')
     alert_threshold = float(config.get('alert_threshold', 60.0))
@@ -120,6 +193,37 @@ def main() -> int:
                                 'sustained_cycles': alert_history[key],
                             })
                             logged_alerts.add(key)
+
+                            if args.respond:
+                                if is_critical_process(score):
+                                    console.print(f'[bold yellow]Protected process detected: {score.name} (PID {score.pid}). Not terminating.[/bold yellow]')
+                                    log_alert({
+                                        'response_action': 'protected process - no termination',
+                                        'pid': score.pid,
+                                        'name': score.name,
+                                        'path': score.path,
+                                        'score': score.risk_score,
+                                        'reasons': score.reasons,
+                                    })
+                                elif confirm_termination(score, console, live):
+                                    terminated, reason = terminate_process(score, console)
+                                    log_alert({
+                                        'response_action': reason,
+                                        'pid': score.pid,
+                                        'name': score.name,
+                                        'path': score.path,
+                                        'score': score.risk_score,
+                                        'reasons': score.reasons,
+                                    })
+                                else:
+                                    log_alert({
+                                        'response_action': 'user declined termination',
+                                        'pid': score.pid,
+                                        'name': score.name,
+                                        'path': score.path,
+                                        'score': score.risk_score,
+                                        'reasons': score.reasons,
+                                    })
 
                 stale_keys = set(alert_history) - current_keys
                 for stale in stale_keys:
