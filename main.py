@@ -16,7 +16,7 @@ from src.collectors.network_collector import collect_network_info
 from src.collectors.process_collector import collect_processes
 from src.collectors.resource_collector import collect_resource_snapshot
 from src.detection.scoring import score_process
-from src.intelligence.osint_loader import load_mining_indicators
+from src.intelligence.osint_loader import load_mining_indicators, load_allowlisted_processes
 from src.storage.alert_logger import log_alert, log_scan_metrics
 from src.response.actions import action_description, list_safe_action_options
 
@@ -46,7 +46,7 @@ def load_config() -> Dict[str, Any]:
         return {}
 
 
-def build_dashboard(resource, top_scores, indicators) -> Panel:
+def build_dashboard(resource, top_scores, indicators, allowlist_count) -> Panel:
     table = Table(title='CryptoJackGuard Process Risk Dashboard', expand=True)
     table.add_column('PID', justify='right')
     table.add_column('Name')
@@ -68,7 +68,10 @@ def build_dashboard(resource, top_scores, indicators) -> Panel:
     resource_text = Text()
     resource_text.append(f'CPU: {resource.cpu_percent:.1f}%  ')
     resource_text.append(f'Memory: {resource.memory_percent:.1f}%  ')
-    resource_text.append(f'Avail: {resource.available_mb:.0f} MB\n')
+    if hasattr(resource, 'available_mb'):
+        resource_text.append(f'Avail: {resource.available_mb:.0f} MB\n')
+    else:
+        resource_text.append('Avail: N/A\n')
     if resource.gpu_percent is not None:
         resource_text.append(f'GPU: {resource.gpu_percent:.1f}%  GPU Mem: {resource.gpu_memory_percent:.1f}%\n')
     else:
@@ -76,13 +79,15 @@ def build_dashboard(resource, top_scores, indicators) -> Panel:
 
     indicator_text = Text(f'Loaded indicators: {len(indicators)} entries')
     indicator_panel = Panel(indicator_text, title='OSINT Indicators', border_style='green')
+    allowlist_text = Text(f'Allowlisted processes: {allowlist_count}')
+    allowlist_panel = Panel(allowlist_text, title='Process Allowlist', border_style='cyan')
     dashboard = Panel(
         table,
         title='CryptoJackGuard MVP',
         subtitle='Press Ctrl+C to exit',
         border_style='blue',
     )
-    return Panel(Group(resource_text, indicator_panel, dashboard), title='CryptoJackGuard Status')
+    return Panel(Group(resource_text, indicator_panel, allowlist_panel, dashboard), title='CryptoJackGuard Status')
 
 
 CRITICAL_PROCESS_NAMES = {
@@ -154,6 +159,8 @@ def main() -> int:
     args = parse_args()
     config = load_config()
     indicators = load_mining_indicators(DATA_DIR / 'mining_iocs.txt')
+    allowlist_names = load_allowlisted_processes(DATA_DIR / 'allowlist_processes.txt')
+    config['allowlist_process_names'] = list(allowlist_names)
     alert_threshold = float(config.get('alert_threshold', 60.0))
     refresh_interval = float(config.get('refresh_interval', 3.0))
     sustained_cycles = int(config.get('sustained_cycles', 2))
@@ -242,7 +249,8 @@ def main() -> int:
                 })
 
                 top_scores = [score for score in scored if score.risk_score >= alert_threshold][:20]
-                dashboard = build_dashboard(resource, top_scores, indicators)
+                allowlist_count = sum(1 for score in scored if score.allowlisted)
+                dashboard = build_dashboard(resource, top_scores, indicators, allowlist_count)
                 live.update(dashboard)
                 sleep(refresh_interval)
     except KeyboardInterrupt:

@@ -20,3 +20,22 @@ def load_mining_indicators(indicator_file: Path) -> Set[str]:
         return indicators
 
     return indicators
+
+
+def load_allowlisted_processes(allowlist_file: Path) -> Set[str]:
+    allowlist: Set[str] = set()
+
+    if not allowlist_file.exists():
+        return allowlist
+
+    try:
+        with allowlist_file.open('r', encoding='utf-8') as handle:
+            for raw_line in handle:
+                line = raw_line.strip()
+                if not line or line.startswith('#'):
+                    continue
+                allowlist.add(line.lower())
+    except OSError:
+        return allowlist
+
+    return allowlist

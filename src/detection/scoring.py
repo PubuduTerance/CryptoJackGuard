@@ -1,5 +1,5 @@
 from __future__ import annotations
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set
 
 from src.collectors.network_collector import ProcessNetworkInfo
@@ -17,6 +17,8 @@ class ProcessScore:
     local_ports: List[int]
     risk_score: float
     reasons: List[str]
+    allowlisted: bool = False
+    allowlist_notes: List[str] = field(default_factory=list)
 
 
 def _matches_indicator(text: str, indicators: Set[str]) -> bool:
@@ -43,12 +45,14 @@ def score_process(
     # trigger high-risk alerts.
     cpu_non_trivial = float(config.get('cpu_non_trivial_threshold', 10.0))
     safe_names = set(name.lower() for name in config.get('safe_process_names', []))
+    allowlist_names = set(name.lower() for name in config.get('allowlist_process_names', []))
 
     name_lower = process.name.lower()
     path_lower = process.path.lower()
     cmdline_lower = process.cmdline.lower()
+    allowlisted = name_lower in allowlist_names
 
-    if process.pid == 0 or name_lower in safe_names:
+    if process.pid == 0 or (name_lower in safe_names and not allowlisted):
         return ProcessScore(
             pid=process.pid,
             name=process.name,
@@ -59,6 +63,7 @@ def score_process(
             local_ports=network_info.local_ports if network_info else [],
             risk_score=0.0,
             reasons=[],
+            allowlisted=allowlisted,
         )
 
     normalized_cpu = min(process.cpu_percent, 100.0)
@@ -86,27 +91,53 @@ def score_process(
     # any external indicators provided. We report which indicators matched
     # so the dashboard can show precise reasons.
     combined_indicators = set(i.lower() for i in suspicious_cmd_indicators) | set(indicators)
-    matched = [ind for ind in combined_indicators if ind and ind in cmdline_lower]
-    matched_unique = sorted(set(matched))
-    num_matched = len(matched_unique)
-    if num_matched > 0:
+    weak_indicators = {'--user', '--url', '--pass'}
+    strong_indicators = {
+        'stratum',
+        'stratum+tcp',
+        'stratum+ssl',
+        'randomx',
+        'rx/0',
+        'xmrig',
+        '--algo',
+        '--coin',
+        '--pool',
+        'donate-level',
+        '--donate-level',
+    }
+    browser_webview_names = {
+        'msedgewebview2.exe',
+        'steamwebhelper.exe',
+        'code.exe',
+        'cefsharp.browsersubprocess.exe',
+    }
+
+    matched_strong = sorted({indicator for indicator in combined_indicators if indicator in cmdline_lower and indicator in strong_indicators})
+    matched_weak = sorted({indicator for indicator in combined_indicators if indicator in cmdline_lower and indicator in weak_indicators})
+
+    if matched_strong:
+        num_matched = len(matched_strong)
         if num_matched == 1:
             score += 10.0
-            reasons.append(f'1 miner-like CLI indicator: {matched_unique}')
+            reasons.append(f'1 miner-like CLI indicator: {matched_strong}')
         elif num_matched == 2:
             score += 25.0
-            reasons.append(f'2 miner-like CLI indicators: {matched_unique}')
+            reasons.append(f'2 miner-like CLI indicators: {matched_strong}')
         else:
             score += 45.0
-            reasons.append(f'{num_matched} miner-like CLI indicators: {matched_unique}')
+            reasons.append(f'{num_matched} miner-like CLI indicators: {matched_strong}')
 
-        # If the process is also consuming non-trivial CPU, increase score
-        # modestly. This ensures processes that both look and behave like
-        # miners are higher risk while CPU-only workloads (no indicators)
-        # remain low-risk.
+        if matched_weak:
+            reasons.append(f'additional weak CLI indicators: {matched_weak}')
+
         if normalized_cpu >= cpu_non_trivial:
             score += 10.0
             reasons.append(f'combined: miner-like args + CPU {normalized_cpu:.1f}%')
+    elif matched_weak:
+        is_browser_webview = name_lower in browser_webview_names
+        if not is_browser_webview:
+            reasons.append(f'weak CLI indicators present: {matched_weak}')
+        # weak indicators alone should not contribute to miner score
 
     if network_info:
         ports = set(network_info.local_ports)
@@ -131,6 +162,24 @@ def score_process(
         score += 10.0
         reasons.append('python process running miner-like tool')
 
+    allowlist_notes: List[str] = []
+    if allowlisted:
+        has_strong_allowlist_indicator = bool(matched_strong) or any(
+            indicator in path_lower or indicator in name_lower
+            for indicator in strong_indicators
+        )
+        if has_strong_allowlist_indicator:
+            allowlist_notes.append('allowlisted process with miner-like indicators')
+        else:
+            if score > 0:
+                score = max(0.0, score - 35.0)
+                allowlist_notes.append('allowlisted process; normal behavior de-emphasized')
+            else:
+                allowlist_notes.append('allowlisted process')
+
+    if allowlist_notes:
+        reasons.extend(allowlist_notes)
+
     score = min(score, 100.0)
 
     return ProcessScore(
@@ -143,4 +192,6 @@ def score_process(
         local_ports=network_info.local_ports if network_info else [],
         risk_score=score,
         reasons=reasons,
+        allowlisted=allowlisted,
+        allowlist_notes=allowlist_notes,
     )

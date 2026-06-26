@@ -13,7 +13,7 @@ from src.collectors.network_collector import collect_network_info
 from src.collectors.process_collector import collect_processes
 from src.collectors.resource_collector import collect_resource_snapshot
 from src.detection.scoring import score_process
-from src.intelligence.osint_loader import load_mining_indicators
+from src.intelligence.osint_loader import load_mining_indicators, load_allowlisted_processes
 
 
 LOG_DIR = Path('logs')
@@ -78,7 +78,7 @@ def load_alert_history(limit: int = 10) -> List[Dict[str, Any]]:
     return alerts[:limit]
 
 
-def build_metric_cards(resource: Any, alerts_count: int, last_scan_ms: float, processes_count: int) -> None:
+def build_metric_cards(resource: Any, alerts_count: int, last_scan_ms: float, processes_count: int, allowlist_count: int) -> None:
     cpu_value = f'{resource.cpu_percent:.1f} %'
     memory_value = f'{resource.memory_percent:.1f} %'
     gpu_value = 'N/A' if resource.gpu_percent is None else f'{resource.gpu_percent:.1f} %'
@@ -93,24 +93,21 @@ def build_metric_cards(resource: Any, alerts_count: int, last_scan_ms: float, pr
     col4, col5, col6 = st.columns(3)
     col4.metric('GPU memory %', gpu_mem_value)
     col5.metric('Processes scanned', processes_count)
-    col6.metric('Alerts detected', alerts_count)
+    col6.metric('Allowlisted processes', allowlist_count)
 
     st.metric('Last scan duration', last_scan_value)
 
 
 def risk_level(score: float) -> str:
-    if score >= 75:
-        return 'Critical'
-    if score >= 50:
+    if score >= 80:
         return 'High'
-    if score >= 30:
+    if score >= 60:
         return 'Medium'
     return 'Low'
 
 
 def risk_color(level: str) -> str:
     return {
-        'Critical': 'red',
         'High': 'orange',
         'Medium': 'yellow',
         'Low': 'green',
@@ -191,6 +188,12 @@ def _render_process_detail(score: Any, network_info: Any) -> None:
         else:
             st.markdown('  - N/A')
 
+    if score.allowlisted:
+        st.markdown(f'- **Allowlist status:** Yes')
+        if score.allowlist_notes:
+            for note in score.allowlist_notes:
+                st.markdown(f'  - {note}')
+
     if network_info:
         st.markdown('#### Network connections')
         if network_info.local_ports:
@@ -209,14 +212,14 @@ def _render_process_detail(score: Any, network_info: Any) -> None:
 
 def main() -> None:
     st.set_page_config(
-        page_title='CryptoJackGuard Dashboard',
+        page_title='CryptoJackGuard v1.2 Advanced Dashboard',
         layout='wide',
         initial_sidebar_state='expanded',
     )
 
     st_autorefresh(interval=5000, limit=None, key='auto_refresh')
 
-    st.markdown('# CryptoJackGuard v1.0 Prototype')
+    st.markdown('# CryptoJackGuard v1.2 Advanced Dashboard')
     st.markdown('### Real-Time Cryptojacking Detection Dashboard')
     st.markdown('---')
 
@@ -226,6 +229,8 @@ def main() -> None:
     processes = collect_processes()
     network_data = collect_network_info()
     indicators_list = load_mining_indicators(DATA_DIR / 'mining_iocs.txt')
+    allowlist_names = load_allowlisted_processes(DATA_DIR / 'allowlist_processes.txt')
+    config['allowlist_process_names'] = list(allowlist_names)
 
     scored = [
         score_process(proc, network_data.get(proc.pid), indicators_list, config)
@@ -245,18 +250,25 @@ def main() -> None:
     with cols[2]:
         st.markdown('### Summary')
 
+    allowlist_count = sum(1 for score in scored if score.allowlisted)
     build_metric_cards(
         resource,
         metrics_summary['alert_count'],
         metrics_summary['last_scan_ms'],
         len(processes),
+        allowlist_count,
     )
 
     st.markdown('---')
 
+    default_scores = [score for score in scored if score.risk_score >= 40]
+    low_risk_scores = [score for score in scored if 0 < score.risk_score < 40]
+    show_low_risk = st.checkbox('Show low-risk processes', value=False)
+    display_scores = default_scores + low_risk_scores if show_low_risk else default_scores
+
     with st.expander('Suspicious process details', expanded=True):
-        process_rows = format_process_rows(suspicious_scores[:50])
-        if process_rows:
+        if display_scores:
+            process_rows = format_process_rows(display_scores[:50])
             options = [
                 f"PID {row['PID']} — {row['Name']} — {row['Risk level']} — {row['Score']}"
                 for row in process_rows
@@ -267,13 +279,13 @@ def main() -> None:
                 format_func=lambda idx: options[idx],
                 key='selected_process_index',
             )
-            st.write(st.table(process_rows))
-            selected_score = suspicious_scores[selected_index]
+            st.table(process_rows)
+            selected_score = display_scores[selected_index]
             selected_network = network_data.get(selected_score.pid)
             st.markdown('---')
             _render_process_detail(selected_score, selected_network)
         else:
-            st.info('No suspicious processes detected in the current scan.')
+            st.info('No suspicious processes detected.')
 
     chart_cols = st.columns(2)
     with chart_cols[0]:
