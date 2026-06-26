@@ -5,3 +5,7 @@ pydantic
 requests
 GPUtil
 setuptools
+streamlit
+pandas
+plotly
+streamlit-autorefresh
