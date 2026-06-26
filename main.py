@@ -59,6 +59,8 @@ def build_dashboard(resource, top_scores, indicators) -> Panel:
     resource_text.append(f'Avail: {resource.available_mb:.0f} MB\n')
     if resource.gpu_percent is not None:
         resource_text.append(f'GPU: {resource.gpu_percent:.1f}%  GPU Mem: {resource.gpu_memory_percent:.1f}%\n')
+    else:
+        resource_text.append('GPU: N/A  GPU Mem: N/A\n')
 
     indicator_text = Text(f'Loaded indicators: {len(indicators)} entries')
     indicator_panel = Panel(indicator_text, title='OSINT Indicators', border_style='green')
@@ -128,6 +130,8 @@ def main() -> int:
                 log_scan_metrics({
                     'cpu_percent': resource.cpu_percent,
                     'memory_percent': resource.memory_percent,
+                    'gpu_percent': resource.gpu_percent,
+                    'gpu_memory_percent': resource.gpu_memory_percent,
                     'processes_scanned': len(processes),
                     'alerts': alert_count,
                     'scan_duration_ms': round(scan_duration_ms, 1),
