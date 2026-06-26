@@ -168,6 +168,45 @@ def load_recent_metrics_summary(metrics: List[Dict[str, Any]]) -> Dict[str, Any]
     return summary
 
 
+def _render_process_detail(score: Any, network_info: Any) -> None:
+    st.markdown('### Selected process details')
+
+    left, right = st.columns([1, 1])
+    with left:
+        st.markdown(f'- **PID:** {score.pid}')
+        st.markdown(f'- **Name:** {score.name}')
+        st.markdown(f'- **Executable path:** {score.path or "N/A"}')
+        st.markdown(f'- **Command line:** {score.cmdline or "N/A"}')
+        st.markdown(f'- **CPU %:** {score.cpu_percent:.1f}')
+        st.markdown(f'- **Memory %:** {score.memory_percent:.1f}')
+    with right:
+        level = risk_level(score.risk_score)
+        color = risk_color(level)
+        st.markdown(f'- **Score:** {score.risk_score:.1f}')
+        st.markdown(f'- **Risk level:** <span style="color:{color};font-weight:600">{level}</span>', unsafe_allow_html=True)
+        st.markdown(f'- **Matched reasons:**')
+        if score.reasons:
+            for reason in score.reasons:
+                st.markdown(f'  - {reason}')
+        else:
+            st.markdown('  - N/A')
+
+    if network_info:
+        st.markdown('#### Network connections')
+        if network_info.local_ports:
+            st.markdown(f'- **Local ports:** {sorted(network_info.local_ports)}')
+        if network_info.remote_addresses:
+            st.markdown(f'- **Remote endpoints:**')
+            for remote in sorted(network_info.remote_addresses):
+                st.markdown(f'  - {remote}')
+        if network_info.remote_ports:
+            st.markdown(f'- **Remote ports:** {sorted(network_info.remote_ports)}')
+        if network_info.statuses:
+            st.markdown(f'- **Connection states:** {sorted(network_info.statuses)}')
+        if not (network_info.local_ports or network_info.remote_addresses or network_info.remote_ports or network_info.statuses):
+            st.markdown('- No network connections observed.')
+
+
 def main() -> None:
     st.set_page_config(
         page_title='CryptoJackGuard Dashboard',
@@ -218,9 +257,21 @@ def main() -> None:
     with st.expander('Suspicious process details', expanded=True):
         process_rows = format_process_rows(suspicious_scores[:50])
         if process_rows:
-            st.write(
-                st.table(process_rows)
+            options = [
+                f"PID {row['PID']} — {row['Name']} — {row['Risk level']} — {row['Score']}"
+                for row in process_rows
+            ]
+            selected_index = st.selectbox(
+                'Select a suspicious process for more details',
+                list(range(len(options))),
+                format_func=lambda idx: options[idx],
+                key='selected_process_index',
             )
+            st.write(st.table(process_rows))
+            selected_score = suspicious_scores[selected_index]
+            selected_network = network_data.get(selected_score.pid)
+            st.markdown('---')
+            _render_process_detail(selected_score, selected_network)
         else:
             st.info('No suspicious processes detected in the current scan.')
 
