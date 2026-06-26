@@ -1,9 +1,10 @@
 from __future__ import annotations
 import csv
 import json
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from time import monotonic
 
 import plotly.express as px
 import streamlit as st
@@ -14,6 +15,7 @@ from src.collectors.process_collector import collect_processes
 from src.collectors.resource_collector import collect_resource_snapshot
 from src.detection.scoring import score_process
 from src.intelligence.osint_loader import load_mining_indicators, load_allowlisted_processes
+from src.storage.alert_logger import log_scan_metrics
 
 
 LOG_DIR = Path('logs')
@@ -33,16 +35,22 @@ def load_config() -> Dict[str, Any]:
         return {}
 
 
-def parse_float(value: str) -> Optional[float]:
+def parse_float(value: Any) -> Optional[float]:
     if value is None:
         return None
-    value = value.strip()
-    if not value or value.upper() == 'N/A':
-        return None
+    if isinstance(value, str):
+        value = value.strip()
     try:
+        if not value or str(value).upper() == 'N/A':
+            return None
         return float(value)
-    except ValueError:
+    except (ValueError, TypeError):
         return None
+
+
+def parse_int(value: Any) -> Optional[int]:
+    parsed = parse_float(value)
+    return None if parsed is None else int(parsed)
 
 
 @st.cache_data
@@ -133,6 +141,67 @@ def format_process_rows(scores: List[Any]) -> List[Dict[str, Any]]:
     return rows
 
 
+def parse_metrics_rows(metrics: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    parsed: List[Dict[str, Any]] = []
+    for row in metrics:
+        ts_text = row.get('timestamp', '')
+        if not ts_text:
+            continue
+        try:
+            timestamp = datetime.fromisoformat(ts_text.replace('Z', '+00:00'))
+        except Exception:
+            continue
+
+        parsed.append({
+            'timestamp': timestamp,
+            'cpu_percent': parse_float(row.get('cpu_percent')),
+            'memory_percent': parse_float(row.get('memory_percent')),
+            'gpu_percent': parse_float(row.get('gpu_percent')),
+            'gpu_memory_percent': parse_float(row.get('gpu_memory_percent')),
+            'alerts': parse_int(row.get('alerts')),
+        })
+
+    parsed.sort(key=lambda item: item['timestamp'])
+    return parsed
+
+
+def filter_metrics_by_range(metrics: List[Dict[str, Any]], time_window: Optional[timedelta]) -> List[Dict[str, Any]]:
+    if time_window is None or not metrics:
+        return metrics[-100:]
+    cutoff = datetime.now(timezone.utc) - time_window
+    filtered = [row for row in metrics if row['timestamp'] >= cutoff]
+    return filtered[-100:]
+
+
+def insert_gaps(rows: List[Dict[str, Any]], field: str, max_gap: timedelta) -> List[Dict[str, Any]]:
+    result: List[Dict[str, Any]] = []
+    previous_timestamp: Optional[datetime] = None
+    for row in rows:
+        if previous_timestamp is not None and row['timestamp'] - previous_timestamp > max_gap:
+            result.append({'timestamp': row['timestamp'], field: None})
+        result.append({'timestamp': row['timestamp'], field: row[field]})
+        previous_timestamp = row['timestamp']
+    return result
+
+
+def build_metrics_chart(rows: List[Dict[str, Any]], field: str, title: str, y_label: str) -> bool:
+    series = insert_gaps(rows, field, timedelta(minutes=2))
+    valid_points = [item for item in series if item[field] is not None]
+    if len(valid_points) < 2:
+        return False
+    fig = px.line(
+        series,
+        x='timestamp',
+        y=field,
+        title=title,
+        labels={field: y_label},
+        template='plotly_dark',
+    )
+    fig.update_layout(xaxis=dict(showspikes=True), yaxis=dict(showgrid=True))
+    st.plotly_chart(fig, use_container_width=True)
+    return True
+
+
 def load_recent_metrics_summary(metrics: List[Dict[str, Any]]) -> Dict[str, Any]:
     summary = {
         'last_scan_ms': 0.0,
@@ -217,14 +286,51 @@ def main() -> None:
         initial_sidebar_state='expanded',
     )
 
-    st_autorefresh(interval=5000, limit=None, key='auto_refresh')
 
     st.markdown('# CryptoJackGuard v1.2 Advanced Dashboard')
     st.markdown('### Real-Time Cryptojacking Detection Dashboard')
     st.markdown('---')
 
     config = load_config()
-    indicators = load_metrics_history()  # reuse cache to keep sidebar stable
+
+    time_range_options = [
+        ('Last 5 minutes', timedelta(minutes=5)),
+        ('Last 15 minutes', timedelta(minutes=15)),
+        ('Last 30 minutes', timedelta(minutes=30)),
+        ('Last 1 hour', timedelta(hours=1)),
+        ('All data', None),
+    ]
+    with st.sidebar:
+        st.header('Controls')
+        enable_auto = st.checkbox(
+            'Enable auto refresh',
+            value=False,
+            key='enable_auto_refresh',
+            help='When enabled the dashboard refreshes every 5 seconds. Default OFF for stability.',
+        )
+        # If auto-refresh is enabled, use streamlit-autorefresh safely.
+        if enable_auto:
+            try:
+                st_autorefresh(interval=5000, limit=None, key='auto_refresh')
+            except Exception:
+                # Avoid crashing on shutdown or environments where autorefresh may fail
+                pass
+
+        # Manual refresh button (works regardless of auto-refresh setting)
+        if st.button('Refresh', key='manual_refresh'):
+            st.experimental_rerun()
+
+        st.markdown('---')
+        st.header('Metrics time range')
+        time_range_label = st.selectbox(
+            'Time range',
+            [label for label, _ in time_range_options],
+            index=2,
+            key='metrics_time_range',
+        )
+
+    # Run a single lightweight scan per refresh
+    scan_start = monotonic()
     resource = collect_resource_snapshot()
     processes = collect_processes()
     network_data = collect_network_info()
@@ -237,6 +343,37 @@ def main() -> None:
         for proc in processes
     ]
     scored.sort(key=lambda item: item.risk_score, reverse=True)
+
+    scan_duration_ms = (monotonic() - scan_start) * 1000.0
+
+    # Log metrics for charts (non-blocking, best-effort)
+    try:
+        alert_threshold = float(config.get('alert_threshold', 60.0))
+    except Exception:
+        alert_threshold = 60.0
+    alert_count = len([s for s in scored if s.risk_score >= alert_threshold])
+    try:
+        log_scan_metrics({
+            'cpu_percent': resource.cpu_percent,
+            'memory_percent': resource.memory_percent,
+            'gpu_percent': resource.gpu_percent,
+            'gpu_memory_percent': resource.gpu_memory_percent,
+            'processes_scanned': len(processes),
+            'alerts': alert_count,
+            'scan_duration_ms': round(scan_duration_ms, 1),
+        })
+        try:
+            load_metrics_history.clear()
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+    # Reload parsed metrics from disk so charts include the latest scan
+    parsed_metrics = parse_metrics_rows(load_metrics_history())
+    selected_range = next(window for label, window in time_range_options if label == time_range_label)
+    filtered_metrics = filter_metrics_by_range(parsed_metrics, selected_range)
+
     suspicious_scores = [score for score in scored if score.risk_score > 0]
 
     metrics_history = load_metrics_history()
@@ -254,7 +391,7 @@ def main() -> None:
     build_metric_cards(
         resource,
         metrics_summary['alert_count'],
-        metrics_summary['last_scan_ms'],
+        scan_duration_ms,
         len(processes),
         allowlist_count,
     )
@@ -289,52 +426,32 @@ def main() -> None:
 
     chart_cols = st.columns(2)
     with chart_cols[0]:
-        if metrics_history:
-            cpu_df = [
-                {'timestamp': metrics_summary['timestamps'][i], 'value': metrics_summary['cpu_history'][i]}
-                for i in range(len(metrics_summary['timestamps']))
-                if metrics_summary['cpu_history'][i] is not None
-            ]
-            if cpu_df:
-                fig_cpu = px.line(cpu_df, x='timestamp', y='value', title='CPU Usage History', labels={'value': 'CPU %'})
-                st.plotly_chart(fig_cpu, use_container_width=True)
-
-            mem_df = [
-                {'timestamp': metrics_summary['timestamps'][i], 'value': metrics_summary['memory_history'][i]}
-                for i in range(len(metrics_summary['timestamps']))
-                if metrics_summary['memory_history'][i] is not None
-            ]
-            if mem_df:
-                fig_mem = px.line(mem_df, x='timestamp', y='value', title='Memory Usage History', labels={'value': 'Memory %'})
-                st.plotly_chart(fig_mem, use_container_width=True)
+        if filtered_metrics:
+            cpu_ok = build_metrics_chart(filtered_metrics, 'cpu_percent', 'CPU Usage History', 'CPU %')
+            mem_ok = build_metrics_chart(filtered_metrics, 'memory_percent', 'Memory Usage History', 'Memory %')
+            if not cpu_ok and not mem_ok:
+                st.info('Not enough recent metrics yet. Run the detector for a few scan cycles.')
+        else:
+            st.info('Not enough recent metrics yet. Run the detector for a few scan cycles.')
 
     with chart_cols[1]:
-        if metrics_history:
-            gpu_df = [
-                {'timestamp': metrics_summary['timestamps'][i], 'value': metrics_summary['gpu_history'][i]}
-                for i in range(len(metrics_summary['timestamps']))
-                if metrics_summary['gpu_history'][i] is not None
-            ]
-            if gpu_df:
-                fig_gpu = px.line(gpu_df, x='timestamp', y='value', title='GPU Usage History', labels={'value': 'GPU %'})
-                st.plotly_chart(fig_gpu, use_container_width=True)
+        if filtered_metrics:
+            gpu_ok = build_metrics_chart(filtered_metrics, 'gpu_percent', 'GPU Usage History', 'GPU %')
+            gpu_mem_ok = build_metrics_chart(filtered_metrics, 'gpu_memory_percent', 'GPU Memory History', 'GPU memory %')
+            if not gpu_ok and not gpu_mem_ok:
+                st.info('Not enough recent metrics yet. Run the detector for a few scan cycles.')
+        else:
+            st.info('Not enough recent metrics yet. Run the detector for a few scan cycles.')
 
-            gpu_mem_df = [
-                {'timestamp': metrics_summary['timestamps'][i], 'value': metrics_summary['gpu_memory_history'][i]}
-                for i in range(len(metrics_summary['timestamps']))
-                if metrics_summary['gpu_memory_history'][i] is not None
-            ]
-            if gpu_mem_df:
-                fig_gpu_mem = px.line(gpu_mem_df, x='timestamp', y='value', title='GPU Memory History', labels={'value': 'GPU memory %'})
-                st.plotly_chart(fig_gpu_mem, use_container_width=True)
-
-    if metrics_history and metrics_summary['timestamps']:
-        alert_df = [
-            {'timestamp': metrics_summary['timestamps'][i], 'alerts': metrics_summary['alert_history'][i]}
-            for i in range(len(metrics_summary['timestamps']))
-        ]
-        fig_alerts = px.bar(alert_df, x='timestamp', y='alerts', title='Alerts Over Time', labels={'alerts': 'Alerts'})
-        st.plotly_chart(fig_alerts, use_container_width=True)
+    if filtered_metrics:
+        alert_df = [{'timestamp': row['timestamp'], 'alerts': row['alerts'] or 0} for row in filtered_metrics if row['alerts'] is not None]
+        if alert_df:
+            fig_alerts = px.bar(alert_df, x='timestamp', y='alerts', title='Alerts Over Time', labels={'alerts': 'Alerts'}, template='plotly_dark')
+            st.plotly_chart(fig_alerts, use_container_width=True)
+        else:
+            st.info('Not enough recent metrics yet. Run the detector for a few scan cycles.')
+    else:
+        st.info('Not enough recent metrics yet. Run the detector for a few scan cycles.')
 
     st.markdown('---')
     with st.container():
