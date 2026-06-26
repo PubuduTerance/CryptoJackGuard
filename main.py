@@ -1,8 +1,7 @@
 from __future__ import annotations
 import json
-import sys
 from pathlib import Path
-from time import sleep
+from time import monotonic, sleep
 from typing import Dict, Any
 
 from rich.console import Console, Group
@@ -16,7 +15,7 @@ from src.collectors.process_collector import collect_processes
 from src.collectors.resource_collector import collect_resource_snapshot
 from src.detection.scoring import score_process
 from src.intelligence.osint_loader import load_mining_indicators
-from src.storage.alert_logger import log_alert
+from src.storage.alert_logger import log_alert, log_scan_metrics
 from src.response.actions import action_description, list_safe_action_options
 
 
@@ -90,6 +89,7 @@ def main() -> int:
     try:
         with Live(console=console, refresh_per_second=4) as live:
             while True:
+                scan_start = monotonic()
                 resource = collect_resource_snapshot()
                 processes = collect_processes()
                 network_data = collect_network_info()
@@ -100,6 +100,7 @@ def main() -> int:
                 ]
                 scored.sort(key=lambda item: item.risk_score, reverse=True)
 
+                scan_duration_ms = (monotonic() - scan_start) * 1000.0
                 current_keys: set[str] = set()
                 for score in scored:
                     if score.risk_score >= alert_threshold:
@@ -122,6 +123,15 @@ def main() -> int:
                 for stale in stale_keys:
                     alert_history.pop(stale, None)
                     logged_alerts.discard(stale)
+
+                alert_count = len([score for score in scored if score.risk_score >= alert_threshold])
+                log_scan_metrics({
+                    'cpu_percent': resource.cpu_percent,
+                    'memory_percent': resource.memory_percent,
+                    'processes_scanned': len(processes),
+                    'alerts': alert_count,
+                    'scan_duration_ms': round(scan_duration_ms, 1),
+                })
 
                 top_scores = [score for score in scored if score.risk_score >= alert_threshold][:20]
                 dashboard = build_dashboard(resource, top_scores, indicators)
