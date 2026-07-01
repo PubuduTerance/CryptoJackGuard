@@ -66,23 +66,42 @@ def load_metrics_history() -> List[Dict[str, Any]]:
     return rows
 
 
-@st.cache_data
-def load_alert_history(limit: int = 10) -> List[Dict[str, Any]]:
+def _format_reasons(reasons: Any) -> str:
+    if isinstance(reasons, list):
+        return ', '.join(str(reason) for reason in reasons)
+    if reasons:
+        return str(reasons)
+    return 'N/A'
+
+
+def load_recent_alerts(limit: int = 10) -> List[Dict[str, Any]]:
     alerts: List[Dict[str, Any]] = []
     if not ALERTS_LOG.exists():
         return alerts
 
-    with ALERTS_LOG.open('r', encoding='utf-8') as handle:
-        for line in handle:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                record = json.loads(line)
-                alerts.append(record)
-            except json.JSONDecodeError:
-                continue
-    alerts.sort(key=lambda item: item.get('timestamp', ''), reverse=True)
+    try:
+        with ALERTS_LOG.open('r', encoding='utf-8') as handle:
+            for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                alerts.append({
+                    'Timestamp': record.get('timestamp', 'N/A'),
+                    'PID': record.get('pid', 'N/A'),
+                    'Name': record.get('name', 'N/A'),
+                    'Score': record.get('score', 'N/A'),
+                    'Action': record.get('response_action') or 'alert',
+                    'Path': record.get('path', 'N/A'),
+                    'Reasons': _format_reasons(record.get('reasons')),
+                })
+    except OSError:
+        return []
+
+    alerts.sort(key=lambda item: item.get('Timestamp', ''), reverse=True)
     return alerts[:limit]
 
 
@@ -279,6 +298,66 @@ def _render_process_detail(score: Any, network_info: Any) -> None:
             st.markdown('- No network connections observed.')
 
 
+def request_streamlit_refresh() -> None:
+    rerun = getattr(st, 'rerun', None)
+    if not callable(rerun):
+        return
+    try:
+        rerun()
+    except Exception:
+        pass
+
+
+def run_dashboard_scan(config: Dict[str, Any]) -> Dict[str, Any]:
+    scan_start = monotonic()
+    resource = collect_resource_snapshot()
+    processes = collect_processes()
+    network_data = collect_network_info()
+    indicators_list = load_mining_indicators(DATA_DIR / 'mining_iocs.txt')
+    allowlist_names = load_allowlisted_processes(DATA_DIR / 'allowlist_processes.txt')
+    config['allowlist_process_names'] = list(allowlist_names)
+
+    scored = [
+        score_process(proc, network_data.get(proc.pid), indicators_list, config)
+        for proc in processes
+    ]
+    scored.sort(key=lambda item: item.risk_score, reverse=True)
+
+    scan_duration_ms = (monotonic() - scan_start) * 1000.0
+
+    try:
+        alert_threshold = float(config.get('alert_threshold', 60.0))
+    except Exception:
+        alert_threshold = 60.0
+    alert_count = len([score for score in scored if score.risk_score >= alert_threshold])
+
+    try:
+        log_scan_metrics({
+            'cpu_percent': resource.cpu_percent,
+            'memory_percent': resource.memory_percent,
+            'gpu_percent': resource.gpu_percent,
+            'gpu_memory_percent': resource.gpu_memory_percent,
+            'processes_scanned': len(processes),
+            'alerts': alert_count,
+            'scan_duration_ms': round(scan_duration_ms, 1),
+        })
+        try:
+            load_metrics_history.clear()
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+    return {
+        'resource': resource,
+        'processes': processes,
+        'network_data': network_data,
+        'scored': scored,
+        'scan_duration_ms': scan_duration_ms,
+        'scan_time': datetime.now(timezone.utc),
+    }
+
+
 def main() -> None:
     st.set_page_config(
         page_title='CryptoJackGuard v1.2 Advanced Dashboard',
@@ -316,9 +395,9 @@ def main() -> None:
                 # Avoid crashing on shutdown or environments where autorefresh may fail
                 pass
 
-        # Manual refresh button (works regardless of auto-refresh setting)
-        if st.button('Refresh', key='manual_refresh'):
-            st.experimental_rerun()
+        refresh_now = st.button('Refresh now', key='manual_refresh')
+        if refresh_now:
+            request_streamlit_refresh()
 
         st.markdown('---')
         st.header('Metrics time range')
@@ -329,52 +408,19 @@ def main() -> None:
             key='metrics_time_range',
         )
 
-    # Run a single lightweight scan per refresh
-    scan_start = monotonic()
-    resource = collect_resource_snapshot()
-    processes = collect_processes()
-    network_data = collect_network_info()
-    indicators_list = load_mining_indicators(DATA_DIR / 'mining_iocs.txt')
-    allowlist_names = load_allowlisted_processes(DATA_DIR / 'allowlist_processes.txt')
-    config['allowlist_process_names'] = list(allowlist_names)
+    scan_state = run_dashboard_scan(config)
+    st.session_state['last_scan'] = scan_state
 
-    scored = [
-        score_process(proc, network_data.get(proc.pid), indicators_list, config)
-        for proc in processes
-    ]
-    scored.sort(key=lambda item: item.risk_score, reverse=True)
-
-    scan_duration_ms = (monotonic() - scan_start) * 1000.0
-
-    # Log metrics for charts (non-blocking, best-effort)
-    try:
-        alert_threshold = float(config.get('alert_threshold', 60.0))
-    except Exception:
-        alert_threshold = 60.0
-    alert_count = len([s for s in scored if s.risk_score >= alert_threshold])
-    try:
-        log_scan_metrics({
-            'cpu_percent': resource.cpu_percent,
-            'memory_percent': resource.memory_percent,
-            'gpu_percent': resource.gpu_percent,
-            'gpu_memory_percent': resource.gpu_memory_percent,
-            'processes_scanned': len(processes),
-            'alerts': alert_count,
-            'scan_duration_ms': round(scan_duration_ms, 1),
-        })
-        try:
-            load_metrics_history.clear()
-        except Exception:
-            pass
-    except Exception:
-        pass
+    resource = scan_state['resource']
+    processes = scan_state['processes']
+    network_data = scan_state['network_data']
+    scored = scan_state['scored']
+    scan_duration_ms = scan_state['scan_duration_ms']
 
     # Reload parsed metrics from disk so charts include the latest scan
     parsed_metrics = parse_metrics_rows(load_metrics_history())
     selected_range = next(window for label, window in time_range_options if label == time_range_label)
     filtered_metrics = filter_metrics_by_range(parsed_metrics, selected_range)
-
-    suspicious_scores = [score for score in scored if score.risk_score > 0]
 
     metrics_history = load_metrics_history()
     metrics_summary = load_recent_metrics_summary(metrics_history)
@@ -398,16 +444,18 @@ def main() -> None:
 
     st.markdown('---')
 
-    default_scores = [score for score in scored if score.risk_score >= 40]
-    low_risk_scores = [score for score in scored if 0 < score.risk_score < 40]
     show_low_risk = st.checkbox('Show low-risk processes', value=False)
-    display_scores = default_scores + low_risk_scores if show_low_risk else default_scores
+    display_scores = [
+        score for score in scored
+        if score.risk_score > 0
+        and (show_low_risk or score.risk_score >= 40)
+    ]
 
     with st.expander('Suspicious process details', expanded=True):
         if display_scores:
             process_rows = format_process_rows(display_scores[:50])
             options = [
-                f"PID {row['PID']} — {row['Name']} — {row['Risk level']} — {row['Score']}"
+                f"PID {row['PID']} - {row['Name']} - {row['Risk level']} - {row['Score']}"
                 for row in process_rows
             ]
             selected_index = st.selectbox(
@@ -456,20 +504,11 @@ def main() -> None:
     st.markdown('---')
     with st.container():
         st.subheader('Recent alerts')
-        alert_items = load_alert_history(10)
+        alert_items = load_recent_alerts(10)
         if not alert_items:
             st.info('No recent suspicious activity.')
         else:
-            for alert in alert_items:
-                ts = alert.get('timestamp', 'Unknown')
-                pid = alert.get('pid', 'N/A')
-                name = alert.get('name', 'N/A')
-                score = alert.get('score', 'N/A')
-                reasons = ', '.join(alert.get('reasons', [])) if isinstance(alert.get('reasons'), list) else alert.get('reasons', 'N/A')
-                response_action = alert.get('response_action')
-                status = f' | Action: {response_action}' if response_action else ''
-                st.markdown(f'**{ts}** — PID {pid} — {name} — Score {score}{status}')
-                st.caption(reasons)
+            st.dataframe(alert_items, use_container_width=True, hide_index=True)
 
     st.markdown('---')
     st.markdown(
