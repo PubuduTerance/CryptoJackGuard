@@ -13,9 +13,11 @@ from streamlit_autorefresh import st_autorefresh
 from src.collectors.network_collector import collect_network_info
 from src.collectors.process_collector import collect_processes
 from src.collectors.resource_collector import collect_resource_snapshot
+from src.detection.alert_lifecycle import AlertLifecycle, build_alert_record
+from src.detection.scan_scheduler import should_run_dashboard_scan
 from src.detection.scoring import score_process
 from src.intelligence.osint_loader import load_mining_indicators, load_allowlisted_processes
-from src.storage.alert_logger import log_scan_metrics
+from src.storage.alert_logger import log_alert, log_scan_metrics
 
 
 LOG_DIR = Path('logs')
@@ -298,17 +300,30 @@ def _render_process_detail(score: Any, network_info: Any) -> None:
             st.markdown('- No network connections observed.')
 
 
-def request_streamlit_refresh() -> None:
-    rerun = getattr(st, 'rerun', None)
-    if not callable(rerun):
-        return
+def get_dashboard_alert_lifecycle(config: Dict[str, Any]) -> AlertLifecycle:
+    """Keep alert confirmation state across normal Streamlit reruns."""
     try:
-        rerun()
-    except Exception:
-        pass
+        alert_threshold = float(config.get('alert_threshold', 60.0))
+    except (TypeError, ValueError):
+        alert_threshold = 60.0
+    try:
+        sustained_cycles = int(config.get('sustained_cycles', 2))
+    except (TypeError, ValueError):
+        sustained_cycles = 2
+    lifecycle = st.session_state.get('alert_lifecycle')
+
+    if (
+        not isinstance(lifecycle, AlertLifecycle)
+        or lifecycle.alert_threshold != alert_threshold
+        or lifecycle.sustained_cycles != max(1, sustained_cycles)
+    ):
+        lifecycle = AlertLifecycle(alert_threshold, sustained_cycles)
+        st.session_state['alert_lifecycle'] = lifecycle
+
+    return lifecycle
 
 
-def run_dashboard_scan(config: Dict[str, Any]) -> Dict[str, Any]:
+def run_dashboard_scan(config: Dict[str, Any], alert_lifecycle: AlertLifecycle) -> Dict[str, Any]:
     scan_start = monotonic()
     resource = collect_resource_snapshot()
     processes = collect_processes()
@@ -325,11 +340,11 @@ def run_dashboard_scan(config: Dict[str, Any]) -> Dict[str, Any]:
 
     scan_duration_ms = (monotonic() - scan_start) * 1000.0
 
-    try:
-        alert_threshold = float(config.get('alert_threshold', 60.0))
-    except Exception:
-        alert_threshold = 60.0
-    alert_count = len([score for score in scored if score.risk_score >= alert_threshold])
+    newly_confirmed_alerts = alert_lifecycle.update(scored)
+    for score in newly_confirmed_alerts:
+        log_alert(build_alert_record(score, alert_lifecycle.sustained_cycles))
+    # Metrics count alerts confirmed in this scan, not raw threshold crossings.
+    confirmed_alert_count = len(newly_confirmed_alerts)
 
     try:
         log_scan_metrics({
@@ -338,7 +353,7 @@ def run_dashboard_scan(config: Dict[str, Any]) -> Dict[str, Any]:
             'gpu_percent': resource.gpu_percent,
             'gpu_memory_percent': resource.gpu_memory_percent,
             'processes_scanned': len(processes),
-            'alerts': alert_count,
+            'alerts': confirmed_alert_count,
             'scan_duration_ms': round(scan_duration_ms, 1),
         })
         try:
@@ -353,6 +368,7 @@ def run_dashboard_scan(config: Dict[str, Any]) -> Dict[str, Any]:
         'processes': processes,
         'network_data': network_data,
         'scored': scored,
+        'newly_confirmed_alerts': newly_confirmed_alerts,
         'scan_duration_ms': scan_duration_ms,
         'scan_time': datetime.now(timezone.utc),
     }
@@ -387,17 +403,16 @@ def main() -> None:
             key='enable_auto_refresh',
             help='When enabled the dashboard refreshes every 5 seconds. Default OFF for stability.',
         )
+        auto_refresh_tick: Optional[int] = None
         # If auto-refresh is enabled, use streamlit-autorefresh safely.
         if enable_auto:
             try:
-                st_autorefresh(interval=5000, limit=None, key='auto_refresh')
+                auto_refresh_tick = st_autorefresh(interval=5000, limit=None, key='auto_refresh')
             except Exception:
                 # Avoid crashing on shutdown or environments where autorefresh may fail
                 pass
 
         refresh_now = st.button('Refresh now', key='manual_refresh')
-        if refresh_now:
-            request_streamlit_refresh()
 
         st.markdown('---')
         st.header('Metrics time range')
@@ -408,8 +423,24 @@ def main() -> None:
             key='metrics_time_range',
         )
 
-    scan_state = run_dashboard_scan(config)
-    st.session_state['last_scan'] = scan_state
+    previous_auto_refresh_tick = st.session_state.get('last_auto_refresh_tick')
+    should_scan = should_run_dashboard_scan(
+        has_previous_scan='last_scan' in st.session_state,
+        manual_refresh=refresh_now,
+        auto_refresh_tick=auto_refresh_tick,
+        previous_auto_refresh_tick=previous_auto_refresh_tick,
+    )
+    if auto_refresh_tick is None:
+        st.session_state.pop('last_auto_refresh_tick', None)
+    else:
+        st.session_state['last_auto_refresh_tick'] = auto_refresh_tick
+
+    if should_scan:
+        alert_lifecycle = get_dashboard_alert_lifecycle(config)
+        scan_state = run_dashboard_scan(config, alert_lifecycle)
+        st.session_state['last_scan'] = scan_state
+    else:
+        scan_state = st.session_state['last_scan']
 
     resource = scan_state['resource']
     processes = scan_state['processes']

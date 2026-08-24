@@ -15,6 +15,7 @@ from rich.text import Text
 from src.collectors.network_collector import collect_network_info
 from src.collectors.process_collector import collect_processes
 from src.collectors.resource_collector import collect_resource_snapshot
+from src.detection.alert_lifecycle import AlertLifecycle, build_alert_record
 from src.detection.scoring import score_process
 from src.intelligence.osint_loader import load_mining_indicators, load_allowlisted_processes
 from src.storage.alert_logger import log_alert, log_scan_metrics
@@ -164,9 +165,7 @@ def main() -> int:
     alert_threshold = float(config.get('alert_threshold', 60.0))
     refresh_interval = float(config.get('refresh_interval', 3.0))
     sustained_cycles = int(config.get('sustained_cycles', 2))
-
-    alert_history: Dict[str, int] = {}
-    logged_alerts: set[str] = set()
+    alert_lifecycle = AlertLifecycle(alert_threshold, sustained_cycles)
 
     try:
         with Live(console=console, refresh_per_second=4) as live:
@@ -183,68 +182,50 @@ def main() -> int:
                 scored.sort(key=lambda item: item.risk_score, reverse=True)
 
                 scan_duration_ms = (monotonic() - scan_start) * 1000.0
-                current_keys: set[str] = set()
-                for score in scored:
-                    if score.risk_score >= alert_threshold:
-                        key = f'{score.pid}:{score.path}:{score.cmdline}'
-                        current_keys.add(key)
-                        alert_history[key] = alert_history.get(key, 0) + 1
-                        if alert_history[key] >= sustained_cycles and key not in logged_alerts:
+                newly_confirmed_alerts = alert_lifecycle.update(scored)
+                for score in newly_confirmed_alerts:
+                    log_alert(build_alert_record(score, alert_lifecycle.sustained_cycles))
+
+                    if args.respond:
+                        if is_critical_process(score):
+                            console.print(f'[bold yellow]Protected process detected: {score.name} (PID {score.pid}). Not terminating.[/bold yellow]')
                             log_alert({
+                                'response_action': 'protected process - no termination',
                                 'pid': score.pid,
                                 'name': score.name,
                                 'path': score.path,
-                                'cmdline': score.cmdline,
                                 'score': score.risk_score,
                                 'reasons': score.reasons,
-                                'sustained_cycles': alert_history[key],
                             })
-                            logged_alerts.add(key)
+                        elif confirm_termination(score, console, live):
+                            terminated, reason = terminate_process(score, console)
+                            log_alert({
+                                'response_action': reason,
+                                'pid': score.pid,
+                                'name': score.name,
+                                'path': score.path,
+                                'score': score.risk_score,
+                                'reasons': score.reasons,
+                            })
+                        else:
+                            log_alert({
+                                'response_action': 'user declined termination',
+                                'pid': score.pid,
+                                'name': score.name,
+                                'path': score.path,
+                                'score': score.risk_score,
+                                'reasons': score.reasons,
+                            })
 
-                            if args.respond:
-                                if is_critical_process(score):
-                                    console.print(f'[bold yellow]Protected process detected: {score.name} (PID {score.pid}). Not terminating.[/bold yellow]')
-                                    log_alert({
-                                        'response_action': 'protected process - no termination',
-                                        'pid': score.pid,
-                                        'name': score.name,
-                                        'path': score.path,
-                                        'score': score.risk_score,
-                                        'reasons': score.reasons,
-                                    })
-                                elif confirm_termination(score, console, live):
-                                    terminated, reason = terminate_process(score, console)
-                                    log_alert({
-                                        'response_action': reason,
-                                        'pid': score.pid,
-                                        'name': score.name,
-                                        'path': score.path,
-                                        'score': score.risk_score,
-                                        'reasons': score.reasons,
-                                    })
-                                else:
-                                    log_alert({
-                                        'response_action': 'user declined termination',
-                                        'pid': score.pid,
-                                        'name': score.name,
-                                        'path': score.path,
-                                        'score': score.risk_score,
-                                        'reasons': score.reasons,
-                                    })
-
-                stale_keys = set(alert_history) - current_keys
-                for stale in stale_keys:
-                    alert_history.pop(stale, None)
-                    logged_alerts.discard(stale)
-
-                alert_count = len([score for score in scored if score.risk_score >= alert_threshold])
+                # Metrics count alerts confirmed in this scan, not raw threshold crossings.
+                confirmed_alert_count = len(newly_confirmed_alerts)
                 log_scan_metrics({
                     'cpu_percent': resource.cpu_percent,
                     'memory_percent': resource.memory_percent,
                     'gpu_percent': resource.gpu_percent,
                     'gpu_memory_percent': resource.gpu_memory_percent,
                     'processes_scanned': len(processes),
-                    'alerts': alert_count,
+                    'alerts': confirmed_alert_count,
                     'scan_duration_ms': round(scan_duration_ms, 1),
                 })
 
