@@ -2,7 +2,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
-from time import monotonic, sleep
+from time import perf_counter, sleep
 from typing import Dict, Any
 
 from rich.console import Console, Group
@@ -16,8 +16,11 @@ from src.collectors.persistence_collector import PersistenceInspectionCache, app
 from src.collectors.process_collector import collect_processes
 from src.collectors.resource_collector import collect_resource_snapshot
 from src.detection.alert_lifecycle import AlertLifecycle, build_alert_record
+from src.detection.anomaly import ProcessAnomalyDetector, apply_anomaly_signal
 from src.detection.scoring import score_process
+from src.intelligence.network_ioc import NetworkIOCMatcher, load_network_indicators
 from src.intelligence.osint_loader import load_mining_indicators, load_allowlisted_processes
+from src.monitoring.timing import build_scan_timings
 from src.privacy.redaction import redact_command_line
 from src.response.actions import is_protected_process, terminate_process
 from src.storage.alert_logger import log_alert, log_scan_metrics
@@ -130,19 +133,48 @@ def main() -> int:
     persistence_cache_seconds = float(config.get('persistence_cache_seconds', 300.0))
     alert_lifecycle = AlertLifecycle(alert_threshold, sustained_cycles)
     persistence_inspector = PersistenceInspectionCache(persistence_cache_seconds)
+    anomaly_detector = ProcessAnomalyDetector(
+        window_size=int(config.get('anomaly_window_size', 12)),
+        min_samples=int(config.get('anomaly_min_samples', 5)),
+        z_threshold=float(config.get('anomaly_z_threshold', 3.0)),
+        max_identities=int(config.get('anomaly_max_identities', 500)),
+        min_cpu_delta=float(config.get('anomaly_min_cpu_delta', 15.0)),
+        min_memory_delta=float(config.get('anomaly_min_memory_delta', 5.0)),
+    )
+    network_ips, network_domains = load_network_indicators(str(DATA_DIR / 'mining_network_iocs.txt'))
+    network_ioc_matcher = NetworkIOCMatcher(
+        network_ips,
+        network_domains,
+        cache_seconds=float(config.get('osint_dns_cache_seconds', 3600.0)),
+        dns_timeout_seconds=float(config.get('osint_dns_timeout_seconds', 1.0)),
+    )
 
     try:
         with Live(console=console, refresh_per_second=4) as live:
             while True:
-                scan_start = monotonic()
+                scan_start = perf_counter()
+                resource_start = perf_counter()
                 resource = collect_resource_snapshot()
+                resource_collection_ms = (perf_counter() - resource_start) * 1000.0
+                process_start = perf_counter()
                 processes = collect_processes()
+                process_collection_ms = (perf_counter() - process_start) * 1000.0
+                network_start = perf_counter()
                 network_data = collect_network_info()
+                network_collection_ms = (perf_counter() - network_start) * 1000.0
+                osint_refresh_info = network_ioc_matcher.refresh()
 
+                scoring_start = perf_counter()
                 scored = [
-                    score_process(proc, network_data.get(proc.pid), indicators, config)
+                    score_process(proc, network_data.get(proc.pid), indicators, config, network_ioc_matcher)
                     for proc in processes
                 ]
+                if bool(config.get('anomaly_enabled', True)):
+                    anomaly_max_score = float(config.get('anomaly_max_score', 8.0))
+                    for score in scored:
+                        apply_anomaly_signal(score, anomaly_detector.observe(score), anomaly_max_score)
+                scoring_anomaly_ms = (perf_counter() - scoring_start) * 1000.0
+                persistence_start = perf_counter()
                 persistence_result = persistence_inspector.inspect_if_triggered(
                     scored,
                     deep_inspection_threshold,
@@ -150,9 +182,19 @@ def main() -> int:
                     config.get('suspicious_cmd_indicators', []),
                 )
                 apply_persistence_findings(scored, persistence_result.findings)
+                persistence_inspection_ms = (perf_counter() - persistence_start) * 1000.0
                 scored.sort(key=lambda item: item.risk_score, reverse=True)
 
-                scan_duration_ms = (monotonic() - scan_start) * 1000.0
+                scan_duration_ms = (perf_counter() - scan_start) * 1000.0
+                timings = build_scan_timings(
+                    resource_collection_ms=resource_collection_ms,
+                    process_collection_ms=process_collection_ms,
+                    network_collection_ms=network_collection_ms,
+                    scoring_anomaly_ms=scoring_anomaly_ms,
+                    persistence_inspection_ms=persistence_inspection_ms,
+                    osint_refresh_ms=osint_refresh_info.duration_ms,
+                    scan_duration_ms=scan_duration_ms,
+                )
                 newly_confirmed_alerts = alert_lifecycle.update(scored)
                 for score in newly_confirmed_alerts:
                     log_alert(build_alert_record(score, alert_lifecycle.sustained_cycles))
@@ -201,7 +243,7 @@ def main() -> int:
                     'gpu_memory_percent': resource.gpu_memory_percent,
                     'processes_scanned': len(processes),
                     'alerts': confirmed_alert_count,
-                    'scan_duration_ms': round(scan_duration_ms, 1),
+                    **{name: round(value, 1) for name, value in timings.items()},
                 })
 
                 top_scores = [score for score in scored if score.risk_score >= alert_threshold][:20]

@@ -4,7 +4,7 @@ import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-from time import monotonic
+from time import monotonic, perf_counter
 
 import plotly.express as px
 import streamlit as st
@@ -15,9 +15,12 @@ from src.collectors.persistence_collector import PersistenceInspectionCache, app
 from src.collectors.process_collector import collect_processes
 from src.collectors.resource_collector import collect_resource_snapshot
 from src.detection.alert_lifecycle import AlertLifecycle, build_alert_record
+from src.detection.anomaly import ProcessAnomalyDetector, apply_anomaly_signal
 from src.detection.scan_scheduler import should_run_dashboard_scan
 from src.detection.scoring import score_process
+from src.intelligence.network_ioc import NetworkIOCMatcher, load_network_indicators
 from src.intelligence.osint_loader import load_mining_indicators, load_allowlisted_processes
+from src.monitoring.timing import build_scan_timings
 from src.privacy.redaction import redact_command_line
 from src.storage.alert_logger import log_alert, log_scan_metrics
 
@@ -109,7 +112,14 @@ def load_recent_alerts(limit: int = 10) -> List[Dict[str, Any]]:
     return alerts[:limit]
 
 
-def build_metric_cards(resource: Any, alerts_count: int, last_scan_ms: float, processes_count: int, allowlist_count: int) -> None:
+def build_metric_cards(
+    resource: Any,
+    alerts_count: int,
+    last_scan_ms: float,
+    processes_count: int,
+    allowlist_count: int,
+    timings: Optional[Dict[str, float]] = None,
+) -> None:
     cpu_value = f'{resource.cpu_percent:.1f} %'
     memory_value = f'{resource.memory_percent:.1f} %'
     gpu_value = 'N/A' if resource.gpu_percent is None else f'{resource.gpu_percent:.1f} %'
@@ -127,6 +137,13 @@ def build_metric_cards(resource: Any, alerts_count: int, last_scan_ms: float, pr
     col6.metric('Allowlisted processes', allowlist_count)
 
     st.metric('Last scan duration', last_scan_value)
+    if timings:
+        st.caption(
+            'Performance — '
+            f"process: {timings.get('process_collection_ms', 0.0):.1f} ms, "
+            f"network: {timings.get('network_collection_ms', 0.0):.1f} ms, "
+            f"scoring: {timings.get('scoring_anomaly_ms', 0.0):.1f} ms"
+        )
 
 
 def risk_level(score: float) -> str:
@@ -182,6 +199,12 @@ def parse_metrics_rows(metrics: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             'gpu_percent': parse_float(row.get('gpu_percent')),
             'gpu_memory_percent': parse_float(row.get('gpu_memory_percent')),
             'alerts': parse_int(row.get('alerts')),
+            'resource_collection_ms': parse_float(row.get('resource_collection_ms')),
+            'process_collection_ms': parse_float(row.get('process_collection_ms')),
+            'network_collection_ms': parse_float(row.get('network_collection_ms')),
+            'scoring_anomaly_ms': parse_float(row.get('scoring_anomaly_ms')),
+            'persistence_inspection_ms': parse_float(row.get('persistence_inspection_ms')),
+            'osint_refresh_ms': parse_float(row.get('osint_refresh_ms')),
         })
 
     parsed.sort(key=lambda item: item['timestamp'])
@@ -289,6 +312,12 @@ def _render_process_detail(score: Any, network_info: Any) -> None:
             for note in score.allowlist_notes:
                 st.markdown(f'  - {note}')
 
+    if score.anomaly_sample_count:
+        st.markdown(f'- **Baseline samples:** {score.anomaly_sample_count}')
+        if score.anomaly_reasons:
+            for reason in score.anomaly_reasons:
+                st.markdown(f'  - {reason}')
+
     if network_info:
         st.markdown('#### Network connections')
         if network_info.local_ports:
@@ -340,27 +369,87 @@ def get_dashboard_persistence_inspector(config: Dict[str, Any]) -> PersistenceIn
     return inspector
 
 
+def get_dashboard_anomaly_detector(config: Dict[str, Any]) -> ProcessAnomalyDetector:
+    detector = st.session_state.get('anomaly_detector')
+    settings = (
+        int(config.get('anomaly_window_size', 12)),
+        int(config.get('anomaly_min_samples', 5)),
+        float(config.get('anomaly_z_threshold', 3.0)),
+        int(config.get('anomaly_max_identities', 500)),
+        float(config.get('anomaly_min_cpu_delta', 15.0)),
+        float(config.get('anomaly_min_memory_delta', 5.0)),
+    )
+    if (
+        not isinstance(detector, ProcessAnomalyDetector)
+        or (
+            detector.window_size,
+            detector.min_samples,
+            detector.z_threshold,
+            detector.max_identities,
+            detector.min_cpu_delta,
+            detector.min_memory_delta,
+        ) != settings
+    ):
+        detector = ProcessAnomalyDetector(*settings)
+        st.session_state['anomaly_detector'] = detector
+    return detector
+
+
+def get_dashboard_network_ioc_matcher(config: Dict[str, Any]) -> NetworkIOCMatcher:
+    matcher = st.session_state.get('network_ioc_matcher')
+    try:
+        cache_seconds = float(config.get('osint_dns_cache_seconds', 3600.0))
+        timeout_seconds = float(config.get('osint_dns_timeout_seconds', 1.0))
+    except (TypeError, ValueError):
+        cache_seconds, timeout_seconds = 3600.0, 1.0
+    if (
+        not isinstance(matcher, NetworkIOCMatcher)
+        or matcher.cache_seconds != max(1.0, cache_seconds)
+        or matcher.dns_timeout_seconds != max(0.1, timeout_seconds)
+    ):
+        literal_ips, domains = load_network_indicators(str(DATA_DIR / 'mining_network_iocs.txt'))
+        matcher = NetworkIOCMatcher(literal_ips, domains, cache_seconds, timeout_seconds)
+        st.session_state['network_ioc_matcher'] = matcher
+    return matcher
+
+
 def run_dashboard_scan(
     config: Dict[str, Any],
     alert_lifecycle: AlertLifecycle,
     persistence_inspector: PersistenceInspectionCache,
+    anomaly_detector: ProcessAnomalyDetector,
+    network_ioc_matcher: NetworkIOCMatcher,
 ) -> Dict[str, Any]:
-    scan_start = monotonic()
+    scan_start = perf_counter()
+    resource_start = perf_counter()
     resource = collect_resource_snapshot()
+    resource_collection_ms = (perf_counter() - resource_start) * 1000.0
+    process_start = perf_counter()
     processes = collect_processes()
+    process_collection_ms = (perf_counter() - process_start) * 1000.0
+    network_start = perf_counter()
     network_data = collect_network_info()
+    network_collection_ms = (perf_counter() - network_start) * 1000.0
+    osint_refresh_info = network_ioc_matcher.refresh()
     indicators_list = load_mining_indicators(DATA_DIR / 'mining_iocs.txt')
     allowlist_names = load_allowlisted_processes(DATA_DIR / 'allowlist_processes.txt')
     config['allowlist_process_names'] = list(allowlist_names)
 
+    scoring_start = perf_counter()
     scored = [
-        score_process(proc, network_data.get(proc.pid), indicators_list, config)
+        score_process(proc, network_data.get(proc.pid), indicators_list, config, network_ioc_matcher)
         for proc in processes
     ]
+    if bool(config.get('anomaly_enabled', True)):
+        anomaly_max_score = float(config.get('anomaly_max_score', 8.0))
+        for score in scored:
+            apply_anomaly_signal(score, anomaly_detector.observe(score), anomaly_max_score)
+    scoring_anomaly_ms = (perf_counter() - scoring_start) * 1000.0
     try:
         deep_inspection_threshold = float(config.get('deep_inspection_threshold', 40.0))
     except (TypeError, ValueError):
         deep_inspection_threshold = 40.0
+    persistence_start = perf_counter()
     persistence_result = persistence_inspector.inspect_if_triggered(
         scored,
         deep_inspection_threshold,
@@ -368,9 +457,19 @@ def run_dashboard_scan(
         config.get('suspicious_cmd_indicators', []),
     )
     apply_persistence_findings(scored, persistence_result.findings)
+    persistence_inspection_ms = (perf_counter() - persistence_start) * 1000.0
     scored.sort(key=lambda item: item.risk_score, reverse=True)
 
-    scan_duration_ms = (monotonic() - scan_start) * 1000.0
+    scan_duration_ms = (perf_counter() - scan_start) * 1000.0
+    timings = build_scan_timings(
+        resource_collection_ms=resource_collection_ms,
+        process_collection_ms=process_collection_ms,
+        network_collection_ms=network_collection_ms,
+        scoring_anomaly_ms=scoring_anomaly_ms,
+        persistence_inspection_ms=persistence_inspection_ms,
+        osint_refresh_ms=osint_refresh_info.duration_ms,
+        scan_duration_ms=scan_duration_ms,
+    )
 
     newly_confirmed_alerts = alert_lifecycle.update(scored)
     for score in newly_confirmed_alerts:
@@ -387,6 +486,7 @@ def run_dashboard_scan(
             'processes_scanned': len(processes),
             'alerts': confirmed_alert_count,
             'scan_duration_ms': round(scan_duration_ms, 1),
+            **{name: round(value, 1) for name, value in timings.items() if name != 'scan_duration_ms'},
         })
         try:
             load_metrics_history.clear()
@@ -402,6 +502,7 @@ def run_dashboard_scan(
         'scored': scored,
         'newly_confirmed_alerts': newly_confirmed_alerts,
         'persistence_result': persistence_result,
+        'timings': timings,
         'scan_duration_ms': scan_duration_ms,
         'scan_time': datetime.now(timezone.utc),
     }
@@ -471,7 +572,15 @@ def main() -> None:
     if should_scan:
         alert_lifecycle = get_dashboard_alert_lifecycle(config)
         persistence_inspector = get_dashboard_persistence_inspector(config)
-        scan_state = run_dashboard_scan(config, alert_lifecycle, persistence_inspector)
+        anomaly_detector = get_dashboard_anomaly_detector(config)
+        network_ioc_matcher = get_dashboard_network_ioc_matcher(config)
+        scan_state = run_dashboard_scan(
+            config,
+            alert_lifecycle,
+            persistence_inspector,
+            anomaly_detector,
+            network_ioc_matcher,
+        )
         st.session_state['last_scan'] = scan_state
     else:
         scan_state = st.session_state['last_scan']
@@ -481,6 +590,7 @@ def main() -> None:
     network_data = scan_state['network_data']
     scored = scan_state['scored']
     scan_duration_ms = scan_state['scan_duration_ms']
+    timings = scan_state.get('timings', {})
 
     # Reload parsed metrics from disk so charts include the latest scan
     parsed_metrics = parse_metrics_rows(load_metrics_history())
@@ -505,6 +615,7 @@ def main() -> None:
         scan_duration_ms,
         len(processes),
         allowlist_count,
+        timings,
     )
 
     st.markdown('---')

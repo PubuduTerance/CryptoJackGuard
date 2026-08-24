@@ -1,0 +1,4 @@
+# Small research-prototype starter set. Domains are resolved only when configured.
+# Add only reviewed mining infrastructure indicators for evaluation.
+pool.supportxmr.com
+xmrpool.eu

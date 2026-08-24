@@ -1,7 +1,7 @@
 from __future__ import annotations
 import os
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set
 
 from src.collectors.network_collector import ProcessNetworkInfo
 from src.collectors.process_collector import ProcessInfo
@@ -23,6 +23,8 @@ class ProcessScore:
     ppid: Optional[int] = None
     parent_name: str = ''
     parent_path: str = ''
+    anomaly_sample_count: int = 0
+    anomaly_reasons: List[str] = field(default_factory=list)
 
 
 def _matches_indicator(text: str, indicators: Set[str]) -> bool:
@@ -108,6 +110,7 @@ def score_process(
     network_info: Optional[ProcessNetworkInfo],
     indicators: Set[str],
     config: Dict,
+    network_ioc_matcher: Optional[Any] = None,
 ) -> ProcessScore:
     score = 0.0
     reasons: List[str] = []
@@ -247,6 +250,11 @@ def score_process(
             for remote in network_info.remote_addresses
             for indicator in indicators
         )
+        network_ioc_matches = (
+            network_ioc_matcher.match_remote_addresses(network_info.remote_addresses)
+            if network_ioc_matcher is not None
+            else []
+        )
         if matching_ports:
             score += 25.0
             reasons.append(f'suspicious mining port(s): {sorted(matching_ports)}')
@@ -254,6 +262,10 @@ def score_process(
         elif network_info.remote_ports and suspicious_ports.intersection(network_info.remote_ports):
             score += 25.0
             reasons.append(f'suspicious remote mining port(s): {sorted(suspicious_ports.intersection(network_info.remote_ports))}')
+            has_mining_network_signal = True
+        elif network_ioc_matches:
+            score += 25.0
+            reasons.append(f'mining network IOC match(es): {network_ioc_matches}')
             has_mining_network_signal = True
         elif remote_matching:
             score += 25.0

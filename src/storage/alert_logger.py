@@ -19,6 +19,12 @@ SYSTEM_METRICS_FIELDS = [
     'processes_scanned',
     'alerts',
     'scan_duration_ms',
+    'resource_collection_ms',
+    'process_collection_ms',
+    'network_collection_ms',
+    'scoring_anomaly_ms',
+    'persistence_inspection_ms',
+    'osint_refresh_ms',
 ]
 
 
@@ -59,53 +65,37 @@ def _normalize_metrics_row(metrics: Dict[str, Any]) -> Dict[str, Any]:
         'processes_scanned': metrics.get('processes_scanned', ''),
         'alerts': metrics.get('alerts', ''),
         'scan_duration_ms': metrics.get('scan_duration_ms', ''),
+        'resource_collection_ms': metrics.get('resource_collection_ms', ''),
+        'process_collection_ms': metrics.get('process_collection_ms', ''),
+        'network_collection_ms': metrics.get('network_collection_ms', ''),
+        'scoring_anomaly_ms': metrics.get('scoring_anomaly_ms', ''),
+        'persistence_inspection_ms': metrics.get('persistence_inspection_ms', ''),
+        'osint_refresh_ms': metrics.get('osint_refresh_ms', ''),
     }
 
 
-def _ensure_system_metrics_header() -> None:
+def _existing_system_metrics_fields() -> list[str]:
+    """Keep existing historical CSV headers intact instead of rewriting logs."""
     if not SYSTEM_METRICS_PATH.exists():
-        return
-
+        return SYSTEM_METRICS_FIELDS
     try:
         with SYSTEM_METRICS_PATH.open('r', encoding='utf-8', newline='') as handle:
-            reader = csv.reader(handle)
-            existing_header = next(reader, None)
+            header = next(csv.reader(handle), None)
     except OSError:
-        return
-
-    if existing_header == SYSTEM_METRICS_FIELDS:
-        return
-
-    try:
-        with SYSTEM_METRICS_PATH.open('r', encoding='utf-8', newline='') as handle:
-            rows = list(csv.DictReader(handle))
-    except OSError:
-        rows = []
-
-    try:
-        with SYSTEM_METRICS_PATH.open('w', encoding='utf-8', newline='') as handle:
-            writer = csv.DictWriter(handle, fieldnames=SYSTEM_METRICS_FIELDS)
-            writer.writeheader()
-            for row in rows:
-                normalized_row = {
-                    field: row.get(field, 'N/A' if field.startswith('gpu_') else '')
-                    for field in SYSTEM_METRICS_FIELDS
-                }
-                writer.writerow(normalized_row)
-    except OSError:
-        pass
+        return SYSTEM_METRICS_FIELDS
+    return header or SYSTEM_METRICS_FIELDS
 
 
 def log_scan_metrics(metrics: Dict[str, Any]) -> None:
     ensure_logs_dir()
     record = _normalize_metrics_row(metrics)
-    _ensure_system_metrics_header()
     try:
         file_exists = SYSTEM_METRICS_PATH.exists()
+        fieldnames = _existing_system_metrics_fields() if file_exists else SYSTEM_METRICS_FIELDS
         with SYSTEM_METRICS_PATH.open('a', encoding='utf-8', newline='') as handle:
-            writer = csv.DictWriter(handle, fieldnames=SYSTEM_METRICS_FIELDS)
+            writer = csv.DictWriter(handle, fieldnames=fieldnames)
             if not file_exists:
                 writer.writeheader()
-            writer.writerow(record)
+            writer.writerow({field: record.get(field, '') for field in fieldnames})
     except OSError:
         pass
