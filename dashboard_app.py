@@ -16,6 +16,7 @@ from src.collectors.process_collector import collect_processes
 from src.collectors.resource_collector import collect_resource_snapshot
 from src.detection.alert_lifecycle import AlertLifecycle, build_alert_record
 from src.detection.anomaly import ProcessAnomalyDetector, apply_anomaly_signal
+from src.detection.browser_behavior import BrowserBehaviorDetector, apply_browser_behavior_signal
 from src.detection.scan_scheduler import should_run_dashboard_scan
 from src.detection.scoring import score_process
 from src.intelligence.network_ioc import NetworkIOCMatcher, load_network_indicators
@@ -318,6 +319,16 @@ def _render_process_detail(score: Any, network_info: Any) -> None:
             for reason in score.anomaly_reasons:
                 st.markdown(f'  - {reason}')
 
+    browser_behavior = getattr(score, 'browser_behavior', None)
+    if browser_behavior is not None:
+        st.markdown('#### Browser behavior')
+        st.markdown(f'- **Browser process:** {"Yes" if browser_behavior.is_browser_process else "No"}')
+        st.markdown(f'- **Sustained compute:** {"Yes" if browser_behavior.sustained_compute else "No"}')
+        st.markdown(f'- **Browser mining suspicion:** {"Yes" if browser_behavior.browser_mining_suspicion else "No"}')
+        if browser_behavior.reasons:
+            for reason in browser_behavior.reasons:
+                st.markdown(f'  - {reason}')
+
     if network_info:
         st.markdown('#### Network connections')
         if network_info.local_ports:
@@ -413,12 +424,30 @@ def get_dashboard_network_ioc_matcher(config: Dict[str, Any]) -> NetworkIOCMatch
     return matcher
 
 
+def get_dashboard_browser_detector(config: Dict[str, Any]) -> BrowserBehaviorDetector:
+    detector = st.session_state.get('browser_behavior_detector')
+    settings = (
+        float(config.get('browser_cpu_threshold', 50.0)),
+        int(config.get('browser_sustained_cycles', 2)),
+        float(config.get('browser_max_score', 12.0)),
+        int(config.get('browser_max_identities', 200)),
+    )
+    if (
+        not isinstance(detector, BrowserBehaviorDetector)
+        or (detector.cpu_threshold, detector.sustained_cycles, detector.max_score, detector.max_identities) != settings
+    ):
+        detector = BrowserBehaviorDetector(*settings)
+        st.session_state['browser_behavior_detector'] = detector
+    return detector
+
+
 def run_dashboard_scan(
     config: Dict[str, Any],
     alert_lifecycle: AlertLifecycle,
     persistence_inspector: PersistenceInspectionCache,
     anomaly_detector: ProcessAnomalyDetector,
     network_ioc_matcher: NetworkIOCMatcher,
+    browser_detector: BrowserBehaviorDetector,
 ) -> Dict[str, Any]:
     scan_start = perf_counter()
     resource_start = perf_counter()
@@ -444,6 +473,10 @@ def run_dashboard_scan(
         anomaly_max_score = float(config.get('anomaly_max_score', 8.0))
         for score in scored:
             apply_anomaly_signal(score, anomaly_detector.observe(score), anomaly_max_score)
+    if bool(config.get('browser_behavior_enabled', True)):
+        for score in scored:
+            apply_browser_behavior_signal(score, browser_detector.analyze(score))
+        browser_detector.prune(scored)
     scoring_anomaly_ms = (perf_counter() - scoring_start) * 1000.0
     try:
         deep_inspection_threshold = float(config.get('deep_inspection_threshold', 40.0))
@@ -574,12 +607,14 @@ def main() -> None:
         persistence_inspector = get_dashboard_persistence_inspector(config)
         anomaly_detector = get_dashboard_anomaly_detector(config)
         network_ioc_matcher = get_dashboard_network_ioc_matcher(config)
+        browser_detector = get_dashboard_browser_detector(config)
         scan_state = run_dashboard_scan(
             config,
             alert_lifecycle,
             persistence_inspector,
             anomaly_detector,
             network_ioc_matcher,
+            browser_detector,
         )
         st.session_state['last_scan'] = scan_state
     else:

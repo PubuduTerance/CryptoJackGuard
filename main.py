@@ -17,6 +17,7 @@ from src.collectors.process_collector import collect_processes
 from src.collectors.resource_collector import collect_resource_snapshot
 from src.detection.alert_lifecycle import AlertLifecycle, build_alert_record
 from src.detection.anomaly import ProcessAnomalyDetector, apply_anomaly_signal
+from src.detection.browser_behavior import BrowserBehaviorDetector, apply_browser_behavior_signal
 from src.detection.scoring import score_process
 from src.intelligence.network_ioc import NetworkIOCMatcher, load_network_indicators
 from src.intelligence.osint_loader import load_mining_indicators, load_allowlisted_processes
@@ -141,6 +142,12 @@ def main() -> int:
         min_cpu_delta=float(config.get('anomaly_min_cpu_delta', 15.0)),
         min_memory_delta=float(config.get('anomaly_min_memory_delta', 5.0)),
     )
+    browser_detector = BrowserBehaviorDetector(
+        cpu_threshold=float(config.get('browser_cpu_threshold', 50.0)),
+        sustained_cycles=int(config.get('browser_sustained_cycles', 2)),
+        max_score=float(config.get('browser_max_score', 12.0)),
+        max_identities=int(config.get('browser_max_identities', 200)),
+    )
     network_ips, network_domains = load_network_indicators(str(DATA_DIR / 'mining_network_iocs.txt'))
     network_ioc_matcher = NetworkIOCMatcher(
         network_ips,
@@ -173,6 +180,10 @@ def main() -> int:
                     anomaly_max_score = float(config.get('anomaly_max_score', 8.0))
                     for score in scored:
                         apply_anomaly_signal(score, anomaly_detector.observe(score), anomaly_max_score)
+                if bool(config.get('browser_behavior_enabled', True)):
+                    for score in scored:
+                        apply_browser_behavior_signal(score, browser_detector.analyze(score))
+                    browser_detector.prune(scored)
                 scoring_anomaly_ms = (perf_counter() - scoring_start) * 1000.0
                 persistence_start = perf_counter()
                 persistence_result = persistence_inspector.inspect_if_triggered(
