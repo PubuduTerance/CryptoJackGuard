@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Dict, Iterable, List, Set
 
 from src.detection.scoring import ProcessScore
+from src.privacy.redaction import redact_command_line
 
 
 class AlertLifecycle:
@@ -56,12 +57,16 @@ class AlertLifecycle:
 
 
 def build_alert_record(score: ProcessScore, sustained_cycles: int) -> Dict[str, object]:
-    """Create the existing alert_logger-compatible record for a confirmation."""
+    """Create a logger-compatible record without exposing sensitive CLI values.
+
+    ``ProcessScore.cmdline`` remains raw in memory so scoring and lifecycle
+    identity retain their current behavior. Only this output record is redacted.
+    """
     return {
         'pid': score.pid,
         'name': score.name,
         'path': score.path,
-        'cmdline': score.cmdline,
+        'cmdline': redact_command_line(score.cmdline),
         'score': score.risk_score,
         'reasons': score.reasons,
         'sustained_cycles': sustained_cycles,

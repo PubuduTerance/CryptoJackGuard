@@ -17,6 +17,7 @@ from src.detection.alert_lifecycle import AlertLifecycle, build_alert_record
 from src.detection.scan_scheduler import should_run_dashboard_scan
 from src.detection.scoring import score_process
 from src.intelligence.osint_loader import load_mining_indicators, load_allowlisted_processes
+from src.privacy.redaction import redact_command_line
 from src.storage.alert_logger import log_alert, log_scan_metrics
 
 
@@ -263,7 +264,7 @@ def _render_process_detail(score: Any, network_info: Any) -> None:
         st.markdown(f'- **PID:** {score.pid}')
         st.markdown(f'- **Name:** {score.name}')
         st.markdown(f'- **Executable path:** {score.path or "N/A"}')
-        st.markdown(f'- **Command line:** {score.cmdline or "N/A"}')
+        st.markdown(f'- **Command line:** {redact_command_line(score.cmdline) or "N/A"}')
         st.markdown(f'- **CPU %:** {score.cpu_percent:.1f}')
         st.markdown(f'- **Memory %:** {score.memory_percent:.1f}')
     with right:

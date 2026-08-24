@@ -5,7 +5,6 @@ from pathlib import Path
 from time import monotonic, sleep
 from typing import Dict, Any
 
-import psutil
 from rich.console import Console, Group
 from rich.table import Table
 from rich.panel import Panel
@@ -18,8 +17,9 @@ from src.collectors.resource_collector import collect_resource_snapshot
 from src.detection.alert_lifecycle import AlertLifecycle, build_alert_record
 from src.detection.scoring import score_process
 from src.intelligence.osint_loader import load_mining_indicators, load_allowlisted_processes
+from src.privacy.redaction import redact_command_line
+from src.response.actions import is_protected_process, terminate_process
 from src.storage.alert_logger import log_alert, log_scan_metrics
-from src.response.actions import action_description, list_safe_action_options
 
 
 CONFIG_PATH = Path('config.json')
@@ -91,28 +91,8 @@ def build_dashboard(resource, top_scores, indicators, allowlist_count) -> Panel:
     return Panel(Group(resource_text, indicator_panel, allowlist_panel, dashboard), title='CryptoJackGuard Status')
 
 
-CRITICAL_PROCESS_NAMES = {
-    'explorer.exe',
-    'svchost.exe',
-    'wininit.exe',
-    'services.exe',
-    'lsass.exe',
-    'csrss.exe',
-    'smss.exe',
-    'winlogon.exe',
-    'code.exe',
-    'chrome.exe',
-    'msedge.exe',
-}
-CRITICAL_PROCESS_PIDS = {0, 4}
-
-
 def find_alerts(scores, threshold):
     return [score for score in scores if score.risk_score >= threshold]
-
-
-def is_critical_process(score) -> bool:
-    return score.pid in CRITICAL_PROCESS_PIDS or score.name.lower() in CRITICAL_PROCESS_NAMES
 
 
 def confirm_termination(score, console: Console, live) -> bool:
@@ -121,6 +101,7 @@ def confirm_termination(score, console: Console, live) -> bool:
     console.print(f'  PID: {score.pid}')
     console.print(f'  Name: {score.name}')
     console.print(f'  Path: {score.path or "N/A"}')
+    console.print(f'  Command line: {redact_command_line(score.cmdline) or "N/A"}')
     console.print(f'  Score: {score.risk_score:.1f}')
     reasons_text = ', '.join(score.reasons) if score.reasons else 'None'
     console.print(f'  Reasons: {reasons_text}')
@@ -132,27 +113,6 @@ def confirm_termination(score, console: Console, live) -> bool:
         return False
     live.start()
     return answer == 'yes'
-
-
-def terminate_process(score, console: Console) -> tuple[bool, str]:
-    try:
-        proc = psutil.Process(score.pid)
-        proc.terminate()
-        proc.wait(timeout=5)
-        console.print(f'[bold green]Process {score.pid} terminated successfully.[/bold green]')
-        return True, 'terminated'
-    except psutil.NoSuchProcess:
-        console.print(f'[bold yellow]Process {score.pid} no longer exists.[/bold yellow]')
-        return False, 'no such process'
-    except psutil.AccessDenied:
-        console.print(f'[bold red]Access denied when terminating process {score.pid}.[/bold red]')
-        return False, 'access denied'
-    except psutil.TimeoutExpired:
-        console.print(f'[bold yellow]Termination timed out for process {score.pid}.[/bold yellow]')
-        return False, 'timeout expired'
-    except Exception as exc:
-        console.print(f'[bold red]Failed to terminate process {score.pid}: {exc}[/bold red]')
-        return False, str(exc)
 
 
 def main() -> int:
@@ -187,7 +147,7 @@ def main() -> int:
                     log_alert(build_alert_record(score, alert_lifecycle.sustained_cycles))
 
                     if args.respond:
-                        if is_critical_process(score):
+                        if is_protected_process(score.pid, score.name):
                             console.print(f'[bold yellow]Protected process detected: {score.name} (PID {score.pid}). Not terminating.[/bold yellow]')
                             log_alert({
                                 'response_action': 'protected process - no termination',
@@ -198,9 +158,13 @@ def main() -> int:
                                 'reasons': score.reasons,
                             })
                         elif confirm_termination(score, console, live):
-                            terminated, reason = terminate_process(score, console)
+                            termination_result = terminate_process(score.pid, score.name)
+                            if termination_result.success:
+                                console.print(f'[bold green]Process {score.pid} terminated successfully.[/bold green]')
+                            else:
+                                console.print(f'[bold yellow]Process {score.pid} was not terminated: {termination_result.status}.[/bold yellow]')
                             log_alert({
-                                'response_action': reason,
+                                'response_action': termination_result.status,
                                 'pid': score.pid,
                                 'name': score.name,
                                 'path': score.path,
