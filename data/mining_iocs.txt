@@ -10,5 +10,3 @@ minerd
 cpuminer
 ccminer
 sgminer
-java -jar
-node --inspect
