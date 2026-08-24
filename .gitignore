@@ -4,17 +4,20 @@ __pycache__/
 *.pyo
 *.pyd
 
-# Virtual environment
+# Virtual environments
 .venv/
+.venv*/
 venv/
 
-# Logs
-logs/*.jsonl
-logs/*.csv
-
-# VS Code optional
+# VS Code
 .vscode/
 
 # OS files
 .DS_Store
 Thumbs.db
+
+# Local archive
+CryptoJackGuard.rar
+
+# Runtime / research logs
+logs/
