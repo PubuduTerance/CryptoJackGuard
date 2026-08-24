@@ -11,6 +11,7 @@ import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 
 from src.collectors.network_collector import collect_network_info
+from src.collectors.persistence_collector import PersistenceInspectionCache, apply_persistence_findings
 from src.collectors.process_collector import collect_processes
 from src.collectors.resource_collector import collect_resource_snapshot
 from src.detection.alert_lifecycle import AlertLifecycle, build_alert_record
@@ -264,6 +265,9 @@ def _render_process_detail(score: Any, network_info: Any) -> None:
         st.markdown(f'- **PID:** {score.pid}')
         st.markdown(f'- **Name:** {score.name}')
         st.markdown(f'- **Executable path:** {score.path or "N/A"}')
+        st.markdown(f'- **Parent PID:** {score.ppid if score.ppid is not None else "N/A"}')
+        st.markdown(f'- **Parent process:** {score.parent_name or "N/A"}')
+        st.markdown(f'- **Parent path:** {score.parent_path or "N/A"}')
         st.markdown(f'- **Command line:** {redact_command_line(score.cmdline) or "N/A"}')
         st.markdown(f'- **CPU %:** {score.cpu_percent:.1f}')
         st.markdown(f'- **Memory %:** {score.memory_percent:.1f}')
@@ -324,7 +328,23 @@ def get_dashboard_alert_lifecycle(config: Dict[str, Any]) -> AlertLifecycle:
     return lifecycle
 
 
-def run_dashboard_scan(config: Dict[str, Any], alert_lifecycle: AlertLifecycle) -> Dict[str, Any]:
+def get_dashboard_persistence_inspector(config: Dict[str, Any]) -> PersistenceInspectionCache:
+    try:
+        cache_seconds = float(config.get('persistence_cache_seconds', 300.0))
+    except (TypeError, ValueError):
+        cache_seconds = 300.0
+    inspector = st.session_state.get('persistence_inspector')
+    if not isinstance(inspector, PersistenceInspectionCache) or inspector.cache_seconds != max(0.0, cache_seconds):
+        inspector = PersistenceInspectionCache(cache_seconds)
+        st.session_state['persistence_inspector'] = inspector
+    return inspector
+
+
+def run_dashboard_scan(
+    config: Dict[str, Any],
+    alert_lifecycle: AlertLifecycle,
+    persistence_inspector: PersistenceInspectionCache,
+) -> Dict[str, Any]:
     scan_start = monotonic()
     resource = collect_resource_snapshot()
     processes = collect_processes()
@@ -337,6 +357,17 @@ def run_dashboard_scan(config: Dict[str, Any], alert_lifecycle: AlertLifecycle) 
         score_process(proc, network_data.get(proc.pid), indicators_list, config)
         for proc in processes
     ]
+    try:
+        deep_inspection_threshold = float(config.get('deep_inspection_threshold', 40.0))
+    except (TypeError, ValueError):
+        deep_inspection_threshold = 40.0
+    persistence_result = persistence_inspector.inspect_if_triggered(
+        scored,
+        deep_inspection_threshold,
+        indicators_list,
+        config.get('suspicious_cmd_indicators', []),
+    )
+    apply_persistence_findings(scored, persistence_result.findings)
     scored.sort(key=lambda item: item.risk_score, reverse=True)
 
     scan_duration_ms = (monotonic() - scan_start) * 1000.0
@@ -370,6 +401,7 @@ def run_dashboard_scan(config: Dict[str, Any], alert_lifecycle: AlertLifecycle) 
         'network_data': network_data,
         'scored': scored,
         'newly_confirmed_alerts': newly_confirmed_alerts,
+        'persistence_result': persistence_result,
         'scan_duration_ms': scan_duration_ms,
         'scan_time': datetime.now(timezone.utc),
     }
@@ -438,7 +470,8 @@ def main() -> None:
 
     if should_scan:
         alert_lifecycle = get_dashboard_alert_lifecycle(config)
-        scan_state = run_dashboard_scan(config, alert_lifecycle)
+        persistence_inspector = get_dashboard_persistence_inspector(config)
+        scan_state = run_dashboard_scan(config, alert_lifecycle, persistence_inspector)
         st.session_state['last_scan'] = scan_state
     else:
         scan_state = st.session_state['last_scan']

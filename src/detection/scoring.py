@@ -1,4 +1,5 @@
 from __future__ import annotations
+import os
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set
 
@@ -19,6 +20,9 @@ class ProcessScore:
     reasons: List[str]
     allowlisted: bool = False
     allowlist_notes: List[str] = field(default_factory=list)
+    ppid: Optional[int] = None
+    parent_name: str = ''
+    parent_path: str = ''
 
 
 def _matches_indicator(text: str, indicators: Set[str]) -> bool:
@@ -40,6 +44,63 @@ def _select_specific_indicator_matches(text: str, indicators: Set[str]) -> List[
             continue
         selected.append(indicator)
     return sorted(selected)
+
+
+SYSTEM_LOOKALIKE_NAMES = {
+    'svchost.exe',
+    'lsass.exe',
+    'services.exe',
+    'winlogon.exe',
+    'csrss.exe',
+    'smss.exe',
+}
+SUSPICIOUS_PARENT_NAMES = {
+    'powershell.exe',
+    'cmd.exe',
+    'wscript.exe',
+    'cscript.exe',
+    'mshta.exe',
+}
+
+
+def normalize_windows_path(path: str) -> str:
+    """Normalize Windows paths for lightweight, case-insensitive checks."""
+    return path.replace('/', '\\').lower()
+
+
+def get_windows_root() -> str:
+    """Return the configured Windows installation root for trusted-path checks."""
+    return os.environ.get('SystemRoot') or os.environ.get('WINDIR') or r'C:\Windows'
+
+
+def is_suspicious_execution_location(path: str) -> bool:
+    """Identify common user-writable or temporary execution locations."""
+    normalized_path = normalize_windows_path(path)
+    if not normalized_path:
+        return False
+    return (
+        '\\appdata\\local\\temp\\' in normalized_path
+        or '\\appdata\\roaming\\' in normalized_path
+        or '\\windows\\temp\\' in normalized_path
+        or '\\temp\\' in normalized_path
+        or ('\\users\\' in normalized_path and '\\downloads\\' in normalized_path)
+    )
+
+
+def is_system_name_masquerading(name: str, path: str) -> bool:
+    """Return whether a system-looking executable is outside System32."""
+    name_lower = name.lower()
+    if name_lower not in SYSTEM_LOOKALIKE_NAMES:
+        return False
+    normalized_path = normalize_windows_path(path)
+    if not normalized_path:
+        return False
+    windows_root = normalize_windows_path(get_windows_root()).rstrip('\\')
+    trusted_paths = {
+        f'{windows_root}\\system32\\{name_lower}',
+        f'{windows_root}\\syswow64\\{name_lower}',
+    }
+    return normalized_path not in trusted_paths
 
 
 def score_process(
@@ -99,6 +160,8 @@ def score_process(
     suspicious_binary_path = bool(
         path_lower and any(keyword in path_lower for keyword in suspicious_path_keywords)
     )
+    suspicious_execution_location = is_suspicious_execution_location(process.path)
+    masquerading = is_system_name_masquerading(process.name, process.path)
 
     if known_miner_name:
         score += 30.0
@@ -111,6 +174,14 @@ def score_process(
     if suspicious_binary_path:
         score += 15.0
         reasons.append('suspicious binary path')
+
+    if suspicious_execution_location:
+        score += 10.0
+        reasons.append('suspicious user-writable execution location')
+
+    if masquerading:
+        score += 20.0
+        reasons.append('system-looking process running outside expected System32 path')
 
     # Count miner-like command line indicators. Use the configured list plus
     # any external indicators provided. We report which indicators matched
@@ -189,6 +260,19 @@ def score_process(
             reasons.append('remote address matches mining IOC')
             has_mining_network_signal = True
 
+    has_miner_indicators = known_miner_name or miner_ioc_in_path_or_cmdline or bool(matched_strong)
+    suspicious_parent = process.parent_name.lower() in SUSPICIOUS_PARENT_NAMES
+    if suspicious_parent and has_miner_indicators:
+        score += 10.0
+        reasons.append('suspicious parent process combined with miner indicators')
+    elif suspicious_parent and suspicious_execution_location:
+        score += 5.0
+        reasons.append('suspicious parent process combined with suspicious execution location')
+
+    if suspicious_execution_location and has_miner_indicators:
+        score += 10.0
+        reasons.append('suspicious execution location combined with miner indicators')
+
     # Special-case softer scoring for python processes running miner tools.
     if name_lower == 'python.exe' and 'xmrig' in cmdline_lower:
         score += 10.0
@@ -198,6 +282,8 @@ def score_process(
     correlated_mining_signals = sum((
         normalized_cpu >= cpu_non_trivial,
         suspicious_binary_path,
+        suspicious_execution_location,
+        masquerading,
         known_miner_name or miner_ioc_in_path_or_cmdline,
         bool(matched_strong),
         has_mining_network_signal,
@@ -207,6 +293,7 @@ def score_process(
         or miner_ioc_in_path_or_cmdline
         or bool(matched_strong)
         or has_mining_network_signal
+        or masquerading
         or correlated_mining_signals >= 2
     )
 
@@ -236,9 +323,12 @@ def score_process(
         cmdline=process.cmdline,
         cpu_percent=process.cpu_percent,
         memory_percent=process.memory_percent,
-        local_ports=network_info.local_ports if network_info else [],
-        risk_score=score,
-        reasons=reasons,
-        allowlisted=allowlisted,
-        allowlist_notes=allowlist_notes,
-    )
+            local_ports=network_info.local_ports if network_info else [],
+            risk_score=score,
+            reasons=reasons,
+            allowlisted=allowlisted,
+            allowlist_notes=allowlist_notes,
+            ppid=process.ppid,
+            parent_name=process.parent_name,
+            parent_path=process.parent_path,
+        )

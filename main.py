@@ -12,6 +12,7 @@ from rich.live import Live
 from rich.text import Text
 
 from src.collectors.network_collector import collect_network_info
+from src.collectors.persistence_collector import PersistenceInspectionCache, apply_persistence_findings
 from src.collectors.process_collector import collect_processes
 from src.collectors.resource_collector import collect_resource_snapshot
 from src.detection.alert_lifecycle import AlertLifecycle, build_alert_record
@@ -125,7 +126,10 @@ def main() -> int:
     alert_threshold = float(config.get('alert_threshold', 60.0))
     refresh_interval = float(config.get('refresh_interval', 3.0))
     sustained_cycles = int(config.get('sustained_cycles', 2))
+    deep_inspection_threshold = float(config.get('deep_inspection_threshold', 40.0))
+    persistence_cache_seconds = float(config.get('persistence_cache_seconds', 300.0))
     alert_lifecycle = AlertLifecycle(alert_threshold, sustained_cycles)
+    persistence_inspector = PersistenceInspectionCache(persistence_cache_seconds)
 
     try:
         with Live(console=console, refresh_per_second=4) as live:
@@ -139,6 +143,13 @@ def main() -> int:
                     score_process(proc, network_data.get(proc.pid), indicators, config)
                     for proc in processes
                 ]
+                persistence_result = persistence_inspector.inspect_if_triggered(
+                    scored,
+                    deep_inspection_threshold,
+                    indicators,
+                    config.get('suspicious_cmd_indicators', []),
+                )
+                apply_persistence_findings(scored, persistence_result.findings)
                 scored.sort(key=lambda item: item.risk_score, reverse=True)
 
                 scan_duration_ms = (monotonic() - scan_start) * 1000.0
