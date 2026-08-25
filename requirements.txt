@@ -9,3 +9,5 @@ streamlit
 pandas
 plotly
 streamlit-autorefresh
+scikit-learn
+joblib

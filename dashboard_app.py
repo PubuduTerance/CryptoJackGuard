@@ -17,10 +17,12 @@ from src.collectors.resource_collector import collect_resource_snapshot
 from src.detection.alert_lifecycle import AlertLifecycle, build_alert_record
 from src.detection.anomaly import ProcessAnomalyDetector, apply_anomaly_signal
 from src.detection.browser_behavior import BrowserBehaviorDetector, apply_browser_behavior_signal
+from src.detection.ml_fusion import apply_ml_signal
 from src.detection.scan_scheduler import should_run_dashboard_scan
 from src.detection.scoring import score_process
 from src.intelligence.network_ioc import NetworkIOCMatcher, load_network_indicators
 from src.intelligence.osint_loader import load_mining_indicators, load_allowlisted_processes
+from src.ml.model_registry import load_model
 from src.monitoring.timing import build_scan_timings
 from src.privacy.redaction import redact_command_line
 from src.storage.alert_logger import log_alert, log_scan_metrics
@@ -167,6 +169,7 @@ def format_process_rows(scores: List[Any]) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
     for score in scores:
         level = risk_level(score.risk_score)
+        ml_conf = getattr(score, 'ml_confidence', 0.0)
         rows.append(
             {
                 'PID': score.pid,
@@ -174,6 +177,7 @@ def format_process_rows(scores: List[Any]) -> List[Dict[str, Any]]:
                 'CPU %': f'{score.cpu_percent:.1f}',
                 'Memory %': f'{score.memory_percent:.1f}',
                 'Score': f'{score.risk_score:.1f}',
+                'ML Confidence': f'{ml_conf * 100.0:.1f}%',
                 'Risk level': level,
                 'Reasons': ', '.join(score.reasons),
                 'Executable path': score.path or 'N/A',
@@ -284,6 +288,14 @@ def load_recent_metrics_summary(metrics: List[Dict[str, Any]]) -> Dict[str, Any]
 def _render_process_detail(score: Any, network_info: Any) -> None:
     st.markdown('### Selected process details')
 
+    # Recommended action based on score.risk_score
+    if score.risk_score >= 60.0:
+        recommended_action = 'High Risk - User confirmation required for termination'
+    elif score.risk_score >= 40.0:
+        recommended_action = 'Medium Risk - Monitor closely'
+    else:
+        recommended_action = 'Low Risk - Safe'
+
     left, right = st.columns([1, 1])
     with left:
         st.markdown(f'- **PID:** {score.pid}')
@@ -296,6 +308,7 @@ def _render_process_detail(score: Any, network_info: Any) -> None:
         st.markdown(f'- **CPU %:** {score.cpu_percent:.1f}')
         st.markdown(f'- **Memory %:** {score.memory_percent:.1f}')
     with right:
+        st.markdown(f'- **Recommended Action:** {recommended_action}')
         level = risk_level(score.risk_score)
         color = risk_color(level)
         st.markdown(f'- **Score:** {score.risk_score:.1f}')
@@ -319,9 +332,19 @@ def _render_process_detail(score: Any, network_info: Any) -> None:
             for reason in score.anomaly_reasons:
                 st.markdown(f'  - {reason}')
 
+    ml_conf = getattr(score, 'ml_confidence', 0.0)
+    st.markdown('#### 🧠 Machine Learning Engine')
+    st.markdown(f'- **ML Confidence:** {ml_conf * 100.0:.1f}%')
+    if ml_conf >= 0.7:
+        st.markdown('- **ML Classification:** High Cryptojacking Probability')
+    elif ml_conf >= 0.4:
+        st.markdown('- **ML Classification:** Moderate Suspicion')
+    else:
+        st.markdown('- **ML Classification:** Benign / Low Risk')
+
     browser_behavior = getattr(score, 'browser_behavior', None)
     if browser_behavior is not None:
-        st.markdown('#### Browser behavior')
+        st.markdown('#### 🕵️ Browser Behavior')
         st.markdown(f'- **Browser process:** {"Yes" if browser_behavior.is_browser_process else "No"}')
         st.markdown(f'- **Sustained compute:** {"Yes" if browser_behavior.sustained_compute else "No"}')
         st.markdown(f'- **Browser mining suspicion:** {"Yes" if browser_behavior.browser_mining_suspicion else "No"}')
@@ -330,7 +353,7 @@ def _render_process_detail(score: Any, network_info: Any) -> None:
                 st.markdown(f'  - {reason}')
 
     if network_info:
-        st.markdown('#### Network connections')
+        st.markdown('#### 🌐 Network Connections')
         if network_info.local_ports:
             st.markdown(f'- **Local ports:** {sorted(network_info.local_ports)}')
         if network_info.remote_addresses:
@@ -441,6 +464,18 @@ def get_dashboard_browser_detector(config: Dict[str, Any]) -> BrowserBehaviorDet
     return detector
 
 
+def get_dashboard_ml_model(model_path: Union[Path, str] = 'models/rf_cryptojack_model.pkl') -> Optional[Any]:
+    """Load and cache the Random Forest cryptojacking ML model in session state."""
+    model = st.session_state.get('ml_model')
+    if model is None:
+        try:
+            model = load_model(model_path)
+            st.session_state['ml_model'] = model
+        except Exception:
+            model = None
+    return model
+
+
 def run_dashboard_scan(
     config: Dict[str, Any],
     alert_lifecycle: AlertLifecycle,
@@ -448,6 +483,7 @@ def run_dashboard_scan(
     anomaly_detector: ProcessAnomalyDetector,
     network_ioc_matcher: NetworkIOCMatcher,
     browser_detector: BrowserBehaviorDetector,
+    ml_model: Optional[Any] = None,
 ) -> Dict[str, Any]:
     scan_start = perf_counter()
     resource_start = perf_counter()
@@ -469,6 +505,9 @@ def run_dashboard_scan(
         score_process(proc, network_data.get(proc.pid), indicators_list, config, network_ioc_matcher)
         for proc in processes
     ]
+    if ml_model is not None:
+        for proc, score in zip(processes, scored):
+            apply_ml_signal(score, proc, network_data.get(proc.pid), ml_model)
     if bool(config.get('anomaly_enabled', True)):
         anomaly_max_score = float(config.get('anomaly_max_score', 8.0))
         for score in scored:
@@ -551,6 +590,7 @@ def main() -> None:
 
     st.markdown('# CryptoJackGuard v1.2 Advanced Dashboard')
     st.markdown('### Real-Time Cryptojacking Detection Dashboard')
+    st.success('🛡️ System Status: Protected - CryptoJackGuard is actively monitoring.')
     st.markdown('---')
 
     config = load_config()
@@ -608,6 +648,7 @@ def main() -> None:
         anomaly_detector = get_dashboard_anomaly_detector(config)
         network_ioc_matcher = get_dashboard_network_ioc_matcher(config)
         browser_detector = get_dashboard_browser_detector(config)
+        ml_model = get_dashboard_ml_model()
         scan_state = run_dashboard_scan(
             config,
             alert_lifecycle,
@@ -615,6 +656,7 @@ def main() -> None:
             anomaly_detector,
             network_ioc_matcher,
             browser_detector,
+            ml_model,
         )
         st.session_state['last_scan'] = scan_state
     else:
@@ -681,7 +723,7 @@ def main() -> None:
             st.markdown('---')
             _render_process_detail(selected_score, selected_network)
         else:
-            st.info('No suspicious processes detected.')
+            st.success('✅ No suspicious processes detected at this time.')
 
     chart_cols = st.columns(2)
     with chart_cols[0]:

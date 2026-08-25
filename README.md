@@ -1,176 +1,143 @@
-# CryptoJackGuard
+# CryptoJackGuard 🛡️
 
-CryptoJackGuard is a defensive research prototype for detecting cryptojacking and suspicious miner-like activity on Windows systems.
+[![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![Status: Academic Prototype](https://img.shields.io/badge/Status-Research%20Prototype-orange.svg)]()
 
-## Research background
+> **CryptoJackGuard** is a lightweight, defensive, machine learning-powered endpoint monitoring system designed to detect and mitigate unauthorized cryptocurrency mining (cryptojacking) on personal computers.
 
-Cryptojacking is the unauthorized use of a victim's CPU/GPU resources to mine cryptocurrency. This project was designed as a lightweight endpoint monitoring system for a final-year thesis, focusing on benign detection and privacy-preserving evaluation rather than active remediation.
+---
 
-The goal is to identify suspicious processes by combining system telemetry, process metadata, network indicators, and threat intelligence, while minimizing false positives and avoiding intrusive behavior.
+## 🛡️ Project Overview
 
-## Features
+Cryptojacking is the unauthorized hijacking of computing resources (CPU, GPU, memory, and network sockets) to mine cryptocurrency on victim devices without consent. Traditional antivirus solutions often miss stealthy, in-browser, or obfuscated miners that mimic benign tasks or throttle execution.
 
-- Real-time process risk dashboard with CPU and memory usage
-- Alerting for sustained suspicious process behavior
-- OSINT-based miner indicator matching from `data/mining_iocs.txt`
-- Optional GPU monitoring using `GPUtil` when available
-- Evaluation logging to `logs/system_metrics.csv` and `logs/alerts.jsonl`
-- Privacy-friendly operation: no browser history or packet payload logging
+**CryptoJackGuard** combines multi-layered heuristic analysis, OSINT threat intelligence, statistical anomaly detection, auto-start persistence auditing, and a Random Forest Machine Learning classifier to deliver robust, privacy-preserving cryptojacking defense.
 
-## Architecture
+---
 
-- `main.py` — primary dashboard loop and scan orchestration
-- `src/collectors/resource_collector.py` — CPU, memory, and optional GPU usage collection
-- `src/collectors/process_collector.py` — process enumeration and metadata
-- `src/collectors/network_collector.py` — process network connection collection
-- `src/intelligence/osint_loader.py` — loads mining-related indicators
-- `src/detection/scoring.py` — combines signals into process risk scores
-- `src/response/actions.py` — safe response helpers
-- `src/storage/alert_logger.py` — alert logging and evaluation metrics logging
-- `data/mining_iocs.txt` — mining indicator list
-- `logs/alerts.jsonl` — alert history log
-- `logs/system_metrics.csv` — scan evaluation metrics log
+## ✨ Key Features
 
-## Installation
+- **Multi-Layered Detection Engine:**
+  - **Resource Telemetry:** Real-time tracking of CPU, memory, and GPU usage.
+  - **OSINT Threat Intelligence:** Fast local indicator matching against known mining pools, wallet protocols, and suspicious ports (`3333`, `4444`, `7777`, Stratum).
+  - **Behavioral Anomaly Detection:** Rolling Z-score anomaly tracking to catch sudden deviations from baseline process behavior.
+  - **Persistence & Masquerading Auditing:** Identifies binaries executing from suspicious paths (`Temp`, `AppData`) or disguised as legitimate system services (`svchost.exe`).
+- **🧠 Machine Learning Engine (Random Forest):**
+  - Extracts 5 key runtime features and provides probabilistic risk confidence (`ml_confidence`).
+  - **Hybrid Risk Fusion:** Fuses heuristic scores with ML confidence to prevent false negatives while suppressing false alarms.
+- **🛡️ Safe Tiered Response System:**
+  - **Tier 1 (Low Risk < 40):** Passive continuous monitoring.
+  - **Tier 2 (Medium Risk 40–59):** Forensic audit logging with elevated scrutiny.
+  - **Tier 3 (High Risk ≥ 60):** User-guided interactive termination prompt with protected process safeguards and a 120-second suppression cooldown.
+- **📊 Dual Visualization Interfaces:**
+  - **Terminal Dashboard:** Interactive, live terminal UI powered by `rich`.
+  - **Enterprise Web Dashboard:** Modern, reactive Streamlit web interface with real-time process details, telemetry metrics, and kill switch controls.
 
-1. Clone or copy the repository to your workstation.
-2. Create and activate a Python environment.
+---
 
-```powershell
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
+## 🏗️ Architecture
+
+CryptoJackGuard operates as a modular, feed-forward pipeline:
+
+```mermaid
+graph TD
+    subgraph Collectors["1. Telemetry Collectors"]
+        A[Resource Collector]
+        B[Process Collector]
+        C[Network Collector]
+        D[Persistence Collector]
+    end
+
+    subgraph Intelligence["2. Threat Intelligence"]
+        E[OSINT IOC Matcher]
+        F[Mining Port Matcher]
+    end
+
+    subgraph Detection["3. Detection & Fusion Engine"]
+        G[Heuristic Scoring Engine]
+        H[Anomaly Detector Z-Score]
+        I[Browser Behavior Engine]
+        J[ML Feature Extractor]
+        K[Random Forest Classifier]
+        L[Hybrid Risk Fusion]
+    end
+
+    subgraph Response["4. Safe Mitigation & UI"]
+        M[Tiered Response Manager]
+        N[Rich Terminal UI]
+        O[Streamlit Web Dashboard]
+        P[JSONL Audit & CSV Logs]
+    end
+
+    Collectors --> Detection
+    Intelligence --> Detection
+    G --> L
+    H --> L
+    I --> L
+    J --> K --> L
+    L --> Response
 ```
 
-3. Install dependencies.
+---
+
+## 🚀 Quick Start
+
+### 1. Prerequisites & Installation
+Ensure you have Python 3.12+ installed.
 
 ```powershell
+# Clone the repository
+git clone https://github.com/PubuduTerance/CryptoJackGuard.git
+cd CryptoJackGuard
+
+# Set up virtual environment
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+
+# Install required dependencies
 pip install -r requirements.txt
 ```
 
-> Note: `GPUtil` is optional. If it is not installed or a GPU is not present, CryptoJackGuard continues normally and reports `GPU: N/A`.
+### 2. Running CryptoJackGuard
 
-## How to run
+- **Option A: Terminal CLI Dashboard**
+  ```powershell
+  python main.py
+  ```
 
-Start the dashboard:
+- **Option B: Enterprise Web Dashboard (Streamlit)**
+  ```powershell
+  streamlit run dashboard_app.py
+  ```
 
-```powershell
-python main.py
-```
+For detailed usage and options, refer to the [User Guide](USER_GUIDE.md) and [Installation Guide](INSTALL.md).
 
-The dashboard refreshes every few seconds, showing process risk scores, overall CPU/memory usage, and loaded indicator count.
+---
 
-Use `Ctrl+C` to stop the program safely.
+## 📊 Evaluation & Performance
 
-## How to test safely
+CryptoJackGuard was rigorously validated through automated evaluation suites:
 
-This project includes two benign test scripts for evaluation:
+1. **Controlled Thesis Scenarios ([tests/run_thesis_evaluation.py](tests/run_thesis_evaluation.py)):**
+   - **10 / 10 Scenarios Passed (100.0% Accuracy)** across baseline Windows tasks, high-CPU video rendering, simulated miners (`xmrig`), masquerading binaries, browser cryptojacking, and enterprise Java servers.
+   - Zero false positives on legitimate high-compute workloads.
+   - Full evaluation report available at [docs/thesis_evaluation_report.md](docs/thesis_evaluation_report.md).
 
-- `tests/cpu_stress_test.py` — generates safe CPU load only
-- `tests/simulated_miner_args.py` — simulates a miner-like command line and CPU-bound workload without real mining or networking
+2. **Performance Benchmark ([tests/run_performance_benchmark.py](tests/run_performance_benchmark.py)):**
+   - **Total Scan Loop Latency:** `~3.4 seconds` total cycle time.
+   - **Process Discovery Overhead:** Optimized down from `~15.9s` to **`~150 ms`** steady-state (~99% reduction).
+   - **Host CPU Overhead:** Minimal background agent footprint (< 1-2% CPU).
+   - Full benchmark report available at [docs/performance_benchmark_report.md](docs/performance_benchmark_report.md).
 
-Run them in a controlled environment and observe how CryptoJackGuard responds.
+---
 
-```powershell
-python tests/cpu_stress_test.py
-python tests/simulated_miner_args.py --algo randomx --pool stratum+tcp://example.com:3333 --user test
-```
+## ⚠️ Disclaimer & Ethical Statement
 
-### Safe testing guidance
+> **Defensive Research Prototype Only:**  
+> CryptoJackGuard was developed solely for final-year cybersecurity research and educational defense evaluation.
+> - This repository **does not contain any malware, exploits, mining payloads, or malicious persistence code**.
+> - It **does not inspect private network payloads, browser histories, or user data**.
+> - All tests utilize safe, benign CPU-bound mathematical operations and mock telemetry.
 
-- Use these scripts only for defensive evaluation.
-- Do not modify them to perform actual mining or network activity.
-- Avoid running them on production systems.
-- The scripts are designed to stop automatically after 60 seconds.
-
-## Explanation of `cpu_stress_test.py`
-
-`tests/cpu_stress_test.py` is a harmless CPU stress test script. It performs deterministic math operations for 60 seconds and prints progress every 10 seconds.
-
-This script is useful for generating benign system load so the detection system can be validated against high CPU utilization without any network or persistence behavior.
-
-## Explanation of `simulated_miner_args.py`
-
-`tests/simulated_miner_args.py` is a harmless miner-like simulation script.
-
-- It accepts common miner-style command-line arguments such as `--algo`, `--pool`, `--user`, and `--threads`.
-- It uses `parse_known_args()` so unknown flags do not crash the script.
-- It performs CPU-bound workload for 60 seconds and prints the parsed arguments.
-- It does not connect to the network, does not mine cryptocurrency, and does not hide itself.
-
-This script is intended to simulate the appearance of a miner process for detection evaluation.
-
-## Evaluation logging
-
-CryptoJackGuard writes scan evaluation data to `logs/system_metrics.csv` and alert events to `logs/alerts.jsonl`.
-
-The CSV contains the exact header:
-
-```csv
-timestamp,cpu_percent,memory_percent,gpu_percent,gpu_memory_percent,processes_scanned,alerts,scan_duration_ms
-```
-
-Each scan records:
-
-- `timestamp` — UTC timestamp for the scan event
-- `cpu_percent` — overall system CPU usage
-- `memory_percent` — system memory usage
-- `gpu_percent` — GPU load if available, otherwise `N/A`
-- `gpu_memory_percent` — GPU memory usage if available, otherwise `N/A`
-- `processes_scanned` — number of processes evaluated
-- `alerts` — number of currently suspicious alerts
-- `scan_duration_ms` — scan time in milliseconds
-
-The `logs/alerts.jsonl` file stores one JSON alert record per line with a UTC timestamp and process details.
-
-## GPU monitoring
-
-GPU monitoring is optional and uses `GPUtil` only if it is installed and a GPU is detected.
-
-- If `GPUtil` is not installed or no GPU is found, CryptoJackGuard continues normally.
-- If GPU detection fails, the dashboard shows `GPU: N/A` and logging writes `N/A` or empty GPU values.
-- The feature is lightweight and does not change core CPU, memory, process, or network scanning logic.
-
-## Limitations
-
-- This prototype is not a production-ready anti-malware product.
-- Detection is heuristic and may produce false positives or false negatives.
-- It currently targets Windows-like process data and may have limited cross-platform coverage.
-- It does not perform active remediation or automated process termination.
-- It does not inspect browser history or packet payload contents.
-- GPU statistics depend on `GPUtil` and available GPU drivers.
-
-## Ethical use statement
-
-CryptoJackGuard is intended for defensive research and testing only.
-
-- Do not use this project to attack or compromise other systems.
-- Do not deploy it as a malware component.
-- Use it only for learning, thesis evaluation, and authorized security testing.
-
-## Thesis demo instructions
-
-1. Start CryptoJackGuard:
-
-```powershell
-python main.py
-```
-
-2. Observe the dashboard refresh and note CPU/memory usage.
-
-3. Generate benign load with the safe stress test:
-
-```powershell
-python tests/cpu_stress_test.py
-```
-
-4. Simulate a miner-like process:
-
-```powershell
-python tests/simulated_miner_args.py --algo randomx --pool stratum+tcp://example.com:3333 --user defender
-```
-
-5. Open `logs/system_metrics.csv` to review evaluation metrics, and `logs/alerts.jsonl` for any alert records.
-
-6. Explain that GPU metrics are optional and appear only when `GPUtil` and a GPU are available; otherwise the dashboard shows `N/A`.
-
-7. Emphasize the privacy-first design: no browsing or packet payload logging, only system and process telemetry used for detection.
+For more details on responsible disclosure and security principles, see [SECURITY.md](SECURITY.md).

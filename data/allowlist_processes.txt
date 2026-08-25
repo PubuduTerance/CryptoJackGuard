@@ -6,3 +6,4 @@ NVIDIA Overlay.exe
 SearchHost.exe
 TextInputHost.exe
 ShellExperienceHost.exe
+java.exe

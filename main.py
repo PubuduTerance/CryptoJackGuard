@@ -18,12 +18,15 @@ from src.collectors.resource_collector import collect_resource_snapshot
 from src.detection.alert_lifecycle import AlertLifecycle, build_alert_record
 from src.detection.anomaly import ProcessAnomalyDetector, apply_anomaly_signal
 from src.detection.browser_behavior import BrowserBehaviorDetector, apply_browser_behavior_signal
+from src.detection.ml_fusion import apply_ml_signal
 from src.detection.scoring import score_process
 from src.intelligence.network_ioc import NetworkIOCMatcher, load_network_indicators
 from src.intelligence.osint_loader import load_mining_indicators, load_allowlisted_processes
+from src.ml.model_registry import load_model
 from src.monitoring.timing import build_scan_timings
 from src.privacy.redaction import redact_command_line
 from src.response.actions import is_protected_process, terminate_process
+from src.response.response_manager import ResponseManager
 from src.storage.alert_logger import log_alert, log_scan_metrics
 
 
@@ -157,6 +160,14 @@ def main() -> int:
     )
 
     try:
+        ml_model = load_model('models/rf_cryptojack_model.pkl')
+    except Exception as exc:
+        console.print(f'[bold yellow]Warning: Could not load ML model: {exc}. Continuing without ML fusion.[/bold yellow]')
+        ml_model = None
+
+    response_manager = ResponseManager()
+
+    try:
         with Live(console=console, refresh_per_second=4) as live:
             while True:
                 scan_start = perf_counter()
@@ -176,6 +187,9 @@ def main() -> int:
                     score_process(proc, network_data.get(proc.pid), indicators, config, network_ioc_matcher)
                     for proc in processes
                 ]
+                if ml_model is not None:
+                    for proc, score in zip(processes, scored):
+                        apply_ml_signal(score, proc, network_data.get(proc.pid), ml_model)
                 if bool(config.get('anomaly_enabled', True)):
                     anomaly_max_score = float(config.get('anomaly_max_score', 8.0))
                     for score in scored:
@@ -211,39 +225,65 @@ def main() -> int:
                     log_alert(build_alert_record(score, alert_lifecycle.sustained_cycles))
 
                     if args.respond:
-                        if is_protected_process(score.pid, score.name):
-                            console.print(f'[bold yellow]Protected process detected: {score.name} (PID {score.pid}). Not terminating.[/bold yellow]')
-                            log_alert({
-                                'response_action': 'protected process - no termination',
-                                'pid': score.pid,
-                                'name': score.name,
-                                'path': score.path,
-                                'score': score.risk_score,
-                                'reasons': score.reasons,
-                            })
-                        elif confirm_termination(score, console, live):
-                            termination_result = terminate_process(score.pid, score.name)
-                            if termination_result.success:
-                                console.print(f'[bold green]Process {score.pid} terminated successfully.[/bold green]')
-                            else:
-                                console.print(f'[bold yellow]Process {score.pid} was not terminated: {termination_result.status}.[/bold yellow]')
-                            log_alert({
-                                'response_action': termination_result.status,
-                                'pid': score.pid,
-                                'name': score.name,
-                                'path': score.path,
-                                'score': score.risk_score,
-                                'reasons': score.reasons,
-                            })
+                        # Tiered response based on risk score
+                        if score.risk_score < 40.0:
+                            # LOW tier: monitor only
+                            continue
+                        elif score.risk_score < 60.0:
+                            # MEDIUM tier: standard alert logging only, no terminal prompt
+                            continue
                         else:
-                            log_alert({
-                                'response_action': 'user declined termination',
-                                'pid': score.pid,
-                                'name': score.name,
-                                'path': score.path,
+                            # HIGH tier (>= 60.0): active confirmation and mitigation
+                            details = {
                                 'score': score.risk_score,
+                                'path': score.path,
+                                'cmdline': score.cmdline,
                                 'reasons': score.reasons,
-                            })
+                            }
+                            if is_protected_process(score.pid, score.name):
+                                console.print(f'[bold yellow]Protected process detected: {score.name} (PID {score.pid}). Not terminating.[/bold yellow]')
+                                response_manager.record_action(score.pid, score.name, action='Protected - skipped', details=details)
+                                log_alert({
+                                    'response_action': 'protected process - no termination',
+                                    'pid': score.pid,
+                                    'name': score.name,
+                                    'path': score.path,
+                                    'score': score.risk_score,
+                                    'reasons': score.reasons,
+                                })
+                                continue
+
+                            if not response_manager.should_prompt(score.pid):
+                                continue
+
+                            response_manager.mark_prompted(score.pid)
+
+                            if confirm_termination(score, console, live):
+                                termination_result = terminate_process(score.pid, score.name)
+                                action_label = 'Terminated' if termination_result.success else f'Failed to terminate ({termination_result.status})'
+                                if termination_result.success:
+                                    console.print(f'[bold green]Process {score.pid} terminated successfully.[/bold green]')
+                                else:
+                                    console.print(f'[bold yellow]Process {score.pid} was not terminated: {termination_result.status}.[/bold yellow]')
+                                response_manager.record_action(score.pid, score.name, action=action_label, details={**details, 'status': termination_result.status})
+                                log_alert({
+                                    'response_action': termination_result.status,
+                                    'pid': score.pid,
+                                    'name': score.name,
+                                    'path': score.path,
+                                    'score': score.risk_score,
+                                    'reasons': score.reasons,
+                                })
+                            else:
+                                response_manager.record_action(score.pid, score.name, action='User declined', details=details)
+                                log_alert({
+                                    'response_action': 'user declined termination',
+                                    'pid': score.pid,
+                                    'name': score.name,
+                                    'path': score.path,
+                                    'score': score.risk_score,
+                                    'reasons': score.reasons,
+                                })
 
                 # Metrics count alerts confirmed in this scan, not raw threshold crossings.
                 confirmed_alert_count = len(newly_confirmed_alerts)
