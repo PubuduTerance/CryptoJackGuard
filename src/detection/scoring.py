@@ -26,6 +26,7 @@ class ProcessScore:
     anomaly_sample_count: int = 0
     anomaly_reasons: List[str] = field(default_factory=list)
     browser_behavior: Optional[Any] = None
+    ml_confidence: float = 0.0
 
 
 def _matches_indicator(text: str, indicators: Set[str]) -> bool:
