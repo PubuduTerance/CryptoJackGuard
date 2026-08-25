@@ -53,6 +53,7 @@
     "chrome.exe",
     "msedge.exe",
     "code.exe",
+    "java.exe",
     "nvidia overlay.exe",
     "killernetworkservice.exe"
   ]

@@ -185,7 +185,7 @@ def score_process(
         reasons.append('suspicious user-writable execution location')
 
     if masquerading:
-        score += 20.0
+        score += 25.0
         reasons.append('system-looking process running outside expected System32 path')
 
     # Count miner-like command line indicators. Use the configured list plus
@@ -273,6 +273,10 @@ def score_process(
             score += 25.0
             reasons.append('remote address matches mining IOC')
             has_mining_network_signal = True
+
+        if has_mining_network_signal and normalized_cpu >= cpu_non_trivial:
+            score += 10.0
+            reasons.append(f'combined: mining network connection + CPU {normalized_cpu:.1f}%')
 
     has_miner_indicators = known_miner_name or miner_ioc_in_path_or_cmdline or bool(matched_strong)
     suspicious_parent = process.parent_name.lower() in SUSPICIOUS_PARENT_NAMES

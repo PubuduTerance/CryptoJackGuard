@@ -29,16 +29,19 @@ def generate_synthetic_dataset(
     rows: List[Dict[str, Any]] = []
 
     # 1. Generate BENIGN samples
-    # Characteristics: normal/low CPU (<35%), normal memory (<25%),
-    # realistic command-line lengths, 0 to moderate network connections, 0 suspicious keywords.
+    # Characteristics: normal/low CPU (<35%) or high-CPU legitimate task (video, games, server),
+    # normal memory (<30%), realistic command-line lengths, 0 to moderate network connections, 0 suspicious keywords.
     for _ in range(benign_count):
-        # 60% idle/low activity (0.0 - 5.0%), 40% active standard apps (5.0 - 35.0%)
-        if random.random() < 0.60:
+        # 50% idle/low activity (0.0 - 5.0%), 35% active standard apps (5.0 - 35.0%), 15% high CPU legitimate workloads (40.0 - 95.0%)
+        r = random.random()
+        if r < 0.50:
             cpu = round(random.uniform(0.0, 5.0), 2)
-        else:
+        elif r < 0.85:
             cpu = round(random.uniform(5.1, 35.0), 2)
+        else:
+            cpu = round(random.uniform(40.0, 95.0), 2)
 
-        mem = round(random.uniform(0.2, 25.0), 2)
+        mem = round(random.uniform(0.2, 30.0), 2)
         cmd_len = random.randint(10, 140)
 
         # 60% of benign processes have 0 network connections, 40% have 1-4
