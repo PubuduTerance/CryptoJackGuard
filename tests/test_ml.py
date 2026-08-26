@@ -9,10 +9,15 @@ from src.collectors.network_collector import ProcessNetworkInfo
 from src.collectors.process_collector import ProcessInfo
 from src.detection.ml_fusion import apply_ml_signal
 from src.detection.scoring import ProcessScore
+from src.ml.dataset_generator import generate_enterprise_dataset, generate_synthetic_dataset
 from src.ml.feature_extractor import FEATURE_NAMES, ProcessFeatureExtractor
-from src.ml.dataset_generator import generate_synthetic_dataset
 from src.ml.model import CryptoJackModel
 from src.ml.model_registry import load_model, save_model
+from src.ml.real_dataset_loader import (
+    build_enterprise_dataset,
+    generate_cryptic_bytes_dataset,
+    generate_minos_benchmark_dataset,
+)
 from src.ml.trainer import train_and_evaluate
 
 
@@ -135,6 +140,60 @@ class TestMLDatasetGenerator(unittest.TestCase):
             self.assertTrue((malicious_df["cpu_percent"] > 70.0).all())
             self.assertTrue((malicious_df["network_connections_count"] >= 1).all())
             self.assertTrue((malicious_df["suspicious_keyword_count"] >= 1).all())
+
+    def test_generate_minos_benchmark_dataset(self):
+        df = generate_minos_benchmark_dataset(count=200, benign_ratio=0.6, random_seed=42)
+        self.assertEqual(len(df), 200)
+        self.assertListEqual(list(df.columns), FEATURE_NAMES + ["label"])
+
+        benign = df[df["label"] == "BENIGN"]
+        malicious = df[df["label"] == "MALICIOUS"]
+        self.assertEqual(len(benign), 120)
+        self.assertEqual(len(malicious), 80)
+        self.assertTrue((benign["suspicious_keyword_count"] == 0).all())
+        self.assertTrue((malicious["suspicious_keyword_count"] >= 1).all())
+        self.assertTrue((malicious["network_connections_count"] >= 1).all())
+
+    def test_generate_cryptic_bytes_dataset(self):
+        df = generate_cryptic_bytes_dataset(count=200, benign_ratio=0.6, random_seed=42)
+        self.assertEqual(len(df), 200)
+        self.assertListEqual(list(df.columns), FEATURE_NAMES + ["label"])
+
+        benign = df[df["label"] == "BENIGN"]
+        malicious = df[df["label"] == "MALICIOUS"]
+        self.assertEqual(len(benign), 120)
+        self.assertEqual(len(malicious), 80)
+        self.assertTrue((benign["suspicious_keyword_count"] == 0).all())
+        self.assertTrue((malicious["suspicious_keyword_count"] >= 1).all())
+
+    def test_build_and_generate_enterprise_dataset(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            out_file = Path(temp_dir) / "enterprise_test.csv"
+            df = build_enterprise_dataset(
+                output_path=out_file,
+                synthetic_benign=100,
+                synthetic_malicious=50,
+                minos_count=50,
+                cryptic_bytes_count=50,
+                random_seed=42,
+            )
+
+            self.assertTrue(out_file.exists())
+            self.assertEqual(len(df), 250)  # 150 + 50 + 50
+            self.assertListEqual(list(df.columns), FEATURE_NAMES + ["label"])
+
+            # Test generator proxy function
+            out_file2 = Path(temp_dir) / "enterprise_test2.csv"
+            df2 = generate_enterprise_dataset(
+                output_path=out_file2,
+                synthetic_benign=50,
+                synthetic_malicious=25,
+                minos_count=25,
+                cryptic_bytes_count=25,
+                random_seed=42,
+            )
+            self.assertTrue(out_file2.exists())
+            self.assertEqual(len(df2), 125)
 
 
 class TestCryptoJackModel(unittest.TestCase):

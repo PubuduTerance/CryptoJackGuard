@@ -41,10 +41,19 @@ def train_and_evaluate(
     Returns:
         Dictionary containing trained model, test data, and computed metrics.
     """
-    # 1. Resolve dataset path
+    # 1. Resolve dataset path (prioritize enterprise mixed dataset if available)
     if data_path is None:
         base_dir = Path(__file__).resolve().parent.parent.parent
-        resolved_data_path = base_dir / "data" / "synthetic_training_data.csv"
+        enterprise_path = base_dir / "data" / "enterprise_training_dataset.csv"
+        synthetic_path = base_dir / "data" / "synthetic_training_data.csv"
+        if enterprise_path.exists():
+            resolved_data_path = enterprise_path
+        elif synthetic_path.exists():
+            resolved_data_path = synthetic_path
+        else:
+            from src.ml.real_dataset_loader import build_enterprise_dataset
+            build_enterprise_dataset(output_path=enterprise_path)
+            resolved_data_path = enterprise_path
     else:
         resolved_data_path = Path(data_path)
 

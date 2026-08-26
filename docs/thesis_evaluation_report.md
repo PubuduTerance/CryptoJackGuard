@@ -1,6 +1,6 @@
 # CryptoJackGuard: Thesis Evaluation & Controlled Scenario Report
 
-**Generated on:** 2026-08-25 05:57:18 UTC  
+**Generated on:** 2026-08-26 03:59:51 UTC  
 **Evaluation Summary:** 10 / 10 Scenarios Passed (100.0% Accuracy)  
 
 ## Executive Summary
@@ -13,14 +13,14 @@ This evaluation report validates the detection fidelity, heuristic scoring, mach
 |:---:|:---|:---|:---:|:---:|:---:|:---:|:---:|
 | 1 | Normal Windows workload | `explorer.exe` | 2.0% | 0.0% | 0.0 | BENIGN | **PASS** |
 | 2 | High CPU legitimate workload | `video_render.exe` | 85.0% | 0.0% | 25.0 | BENIGN/LOW | **PASS** |
-| 3 | Simulated CPU miner | `xmrig.exe` | 95.0% | 99.2% | 100.0 | HIGH | **PASS** |
+| 3 | Simulated CPU miner | `xmrig.exe` | 95.0% | 100.0% | 100.0 | HIGH | **PASS** |
 | 4 | Miner-like CLI + high CPU | `unknown.exe` | 80.0% | 0.0% | 100.0 | HIGH | **PASS** |
-| 5 | Miner + mining network IOC | `miner.exe` | 90.0% | 0.2% | 100.0 | VERY HIGH | **PASS** |
+| 5 | Miner + mining network IOC | `miner.exe` | 90.0% | 0.0% | 100.0 | VERY HIGH | **PASS** |
 | 6 | Masqueraded process | `svchost.exe` | 75.0% | 0.0% | 60.0 | HIGH | **PASS** |
 | 7 | Persistence + miner evidence | `updater.exe` | 80.0% | 0.0% | 100.0 | HIGH | **PASS** |
 | 8 | Browser sustained CPU + mining IOC | `chrome.exe` | 60.0% | 0.0% | 60.0 | HIGH | **PASS** |
-| 9 | False-positive Java server | `java.exe` | 90.0% | 1.0% | 10.0 | BENIGN | **PASS** |
-| 10 | Normal Chrome high CPU | `chrome.exe` | 85.0% | 0.2% | 0.2 | BENIGN/LOW | **PASS** |
+| 9 | False-positive Java server | `java.exe` | 90.0% | 0.0% | 10.0 | BENIGN | **PASS** |
+| 10 | Normal Chrome high CPU | `chrome.exe` | 85.0% | 0.0% | 0.0 | BENIGN/LOW | **PASS** |
 
 ## Detailed Scenario Findings
 
@@ -45,7 +45,7 @@ This evaluation report validates the detection fidelity, heuristic scoring, mach
 ### Scenario 3: Simulated CPU miner [PASS]
 - **Target Process:** `xmrig.exe` (CPU: 95.0%)
 - **Expected Classification:** `HIGH`
-- **Final Computed Risk Score:** `100.0/100.0` (ML Confidence: `99.2%`)
+- **Final Computed Risk Score:** `100.0/100.0` (ML Confidence: `100.0%`)
 - **Outcome:** HIGH RISK
 - **Triggered Evidence / Reasons:**
   - high CPU usage (95.0%)
@@ -59,7 +59,7 @@ This evaluation report validates the detection fidelity, heuristic scoring, mach
   - suspicious remote mining port(s): [3333]
   - combined: mining network connection + CPU 95.0%
   - suspicious execution location combined with miner indicators
-  - ML Detection: High Confidence (99.2%)
+  - ML Detection: High Confidence (100.0%)
 - **Scenario Context & Notes:** Known miner binary name + CLI stratum indicators + Stratum port 3333 + 95% CPU.
 
 ### Scenario 4: Miner-like CLI + high CPU [PASS]
@@ -78,7 +78,7 @@ This evaluation report validates the detection fidelity, heuristic scoring, mach
 ### Scenario 5: Miner + mining network IOC [PASS]
 - **Target Process:** `miner.exe` (CPU: 90.0%)
 - **Expected Classification:** `VERY HIGH`
-- **Final Computed Risk Score:** `100.0/100.0` (ML Confidence: `0.2%`)
+- **Final Computed Risk Score:** `100.0/100.0` (ML Confidence: `0.0%`)
 - **Outcome:** VERY HIGH RISK
 - **Triggered Evidence / Reasons:**
   - high CPU usage (90.0%)
@@ -130,7 +130,7 @@ This evaluation report validates the detection fidelity, heuristic scoring, mach
 ### Scenario 9: False-positive Java server [PASS]
 - **Target Process:** `java.exe` (CPU: 90.0%)
 - **Expected Classification:** `BENIGN`
-- **Final Computed Risk Score:** `10.0/100.0` (ML Confidence: `1.0%`)
+- **Final Computed Risk Score:** `10.0/100.0` (ML Confidence: `0.0%`)
 - **Outcome:** BENIGN (Low Risk)
 - **Triggered Evidence / Reasons:**
   - high CPU usage (90.0%)
@@ -141,7 +141,7 @@ This evaluation report validates the detection fidelity, heuristic scoring, mach
 ### Scenario 10: Normal Chrome high CPU [PASS]
 - **Target Process:** `chrome.exe` (CPU: 85.0%)
 - **Expected Classification:** `BENIGN/LOW`
-- **Final Computed Risk Score:** `0.2/100.0` (ML Confidence: `0.2%`)
+- **Final Computed Risk Score:** `0.0/100.0` (ML Confidence: `0.0%`)
 - **Outcome:** BENIGN (Low Risk)
 - **Triggered Evidence / Reasons:**
   - high CPU usage (85.0%)

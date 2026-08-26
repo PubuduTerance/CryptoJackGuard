@@ -84,7 +84,10 @@ def generate_synthetic_dataset(
     df = pd.DataFrame(rows)
     df = df.sample(frac=1.0, random_state=random_seed).reset_index(drop=True)
 
-    # Determine default destination if not explicitly provided
+    # Determine destination if writing to disk
+    if output_path is False or output_path == "":
+        return df
+
     if output_path is None:
         base_dir = Path(__file__).resolve().parent.parent.parent
         resolved_path = base_dir / "data" / "synthetic_training_data.csv"
@@ -100,5 +103,26 @@ def generate_synthetic_dataset(
     return df
 
 
+def generate_enterprise_dataset(
+    output_path: Optional[Union[Path, str]] = None,
+    synthetic_benign: int = 1000,
+    synthetic_malicious: int = 500,
+    minos_count: int = 500,
+    cryptic_bytes_count: int = 500,
+    random_seed: Optional[int] = 42,
+) -> pd.DataFrame:
+    """Generate enterprise mixed dataset combining synthetic baseline, MINOS, and Cryptic Bytes benchmarks."""
+    from src.ml.real_dataset_loader import build_enterprise_dataset
+    return build_enterprise_dataset(
+        output_path=output_path,
+        synthetic_benign=synthetic_benign,
+        synthetic_malicious=synthetic_malicious,
+        minos_count=minos_count,
+        cryptic_bytes_count=cryptic_bytes_count,
+        random_seed=random_seed,
+    )
+
+
 if __name__ == "__main__":
     generate_synthetic_dataset()
+    generate_enterprise_dataset()

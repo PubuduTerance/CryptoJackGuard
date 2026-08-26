@@ -56,5 +56,8 @@
     "java.exe",
     "nvidia overlay.exe",
     "killernetworkservice.exe"
-  ]
+  ],
+  "enterprise_mode": true,
+  "siem_host": "127.0.0.1",
+  "siem_port": 514
 }

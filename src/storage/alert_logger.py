@@ -1,15 +1,22 @@
 from __future__ import annotations
 import csv
 import json
+from pathlib import Path
 import sys
 from datetime import datetime, timezone
-from pathlib import Path
-from typing import Dict, Any
+from typing import Dict, Any, Optional
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.privacy.redaction import redact_command_line
+from src.storage.siem_exporter import export_to_siem
 
 ALERTS_LOG_PATH = Path('logs') / 'alerts.jsonl'
 SYSTEM_METRICS_PATH = Path('logs') / 'system_metrics.csv'
+CONFIG_PATH = Path('config.json')
+
 SYSTEM_METRICS_FIELDS = [
     'timestamp',
     'cpu_percent',
@@ -36,8 +43,40 @@ def _utc_timestamp() -> str:
     return datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
 
 
-def log_alert(alert: Dict[str, Any]) -> bool:
-    """Append one alert and return whether persistence succeeded."""
+def _load_config() -> Dict[str, Any]:
+    """Load configuration settings safely."""
+    target_path = CONFIG_PATH if CONFIG_PATH.exists() else (PROJECT_ROOT / 'config.json')
+    if not target_path.exists():
+        return {}
+    try:
+        with target_path.open('r', encoding='utf-8') as handle:
+            return json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def log_alert(
+    alert: Dict[str, Any],
+    siem_export: Optional[bool] = None,
+    siem_host: Optional[str] = None,
+    siem_port: Optional[int] = None,
+    siem_protocol: Optional[str] = None,
+) -> bool:
+    """Append one alert and return whether persistence succeeded.
+
+    Optionally forwards high-severity alerts and response actions to an enterprise SIEM/Syslog server
+    when enterprise_mode is active or siem_export is True.
+
+    Args:
+        alert: Alert data dictionary.
+        siem_export: Optional explicit boolean flag to enable/disable SIEM forwarding.
+        siem_host: Optional SIEM server hostname/IP override.
+        siem_port: Optional SIEM server port override.
+        siem_protocol: Optional transport protocol override ('udp' or 'tcp').
+
+    Returns:
+        True if local file logging succeeded, False otherwise.
+    """
     alert_record = {
         'timestamp': _utc_timestamp(),
         **alert,
@@ -45,14 +84,47 @@ def log_alert(alert: Dict[str, Any]) -> bool:
     if isinstance(alert_record.get('cmdline'), str):
         alert_record['cmdline'] = redact_command_line(alert_record['cmdline'])
 
+    file_success = False
     try:
         ensure_logs_dir()
         with ALERTS_LOG_PATH.open('a', encoding='utf-8') as handle:
             handle.write(json.dumps(alert_record, ensure_ascii=False) + '\n')
+        file_success = True
     except OSError as exc:
         print(f'Warning: failed to write alert log: {exc}', file=sys.stderr)
         return False
-    return True
+
+    # Handle Centralized SIEM / Syslog Alerting
+    try:
+        cfg = _load_config()
+        enterprise_enabled = bool(cfg.get('enterprise_mode', False))
+        resolved_host = siem_host or str(cfg.get('siem_host', '127.0.0.1'))
+        resolved_port = int(siem_port or cfg.get('siem_port', 514))
+        resolved_proto = str(siem_protocol or cfg.get('siem_protocol', 'udp'))
+
+        # Determine whether to forward to SIEM
+        should_export = False
+        if siem_export is True:
+            should_export = True
+        elif siem_export is None and enterprise_enabled:
+            score = float(alert_record.get('score') or alert_record.get('risk_score') or 0.0)
+            has_action = bool(alert_record.get('response_action'))
+            # Export confirmed high-severity alerts (score >= 60.0) or executed response actions
+            if score >= 60.0 or has_action or alert_record.get('confirmed') or alert_record.get('sustained_cycles', 0) >= 1:
+                should_export = True
+
+        if should_export:
+            export_to_siem(
+                alert_record=alert_record,
+                syslog_host=resolved_host,
+                port=resolved_port,
+                protocol=resolved_proto,
+            )
+    except Exception as exc:
+        # Never crash or fail local logging due to SIEM export issues
+        print(f'Warning: SIEM export dispatch error: {exc}', file=sys.stderr)
+
+    return file_success
 
 
 def _normalize_metrics_row(metrics: Dict[str, Any]) -> Dict[str, Any]:

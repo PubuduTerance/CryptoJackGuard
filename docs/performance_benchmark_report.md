@@ -1,7 +1,7 @@
 # CryptoJackGuard: Performance & Latency Benchmark Report
 
-**Generated on:** 2026-08-25 05:57:02 UTC  
-**Benchmark Dataset:** 507 Monitoring Cycles Analyzed  
+**Generated on:** 2026-08-26 04:00:00 UTC  
+**Benchmark Dataset:** 519 Monitoring Cycles Analyzed  
 
 ## Executive Summary
 
@@ -11,17 +11,17 @@ This report evaluates the runtime latency profile, telemetry collection overhead
 
 | Module / Inspection Stage | Mean Latency (ms) | P95 Latency (ms) |
 |:---|:---:|:---:|
-| Total Scan Loop Duration | 3459.18 ms | 3875.78 ms |
-| Process Telemetry Collection | 152.86 ms | 183.24 ms |
-| Network Connections Collection | 99.19 ms | 118.73 ms |
-| Scoring, Fusion & Anomaly Engine | 48.09 ms | 58.50 ms |
-| Persistence & Auto-Start Inspection | 22.05 ms | 28.18 ms |
-| System Resource Telemetry Collection | 14.52 ms | 18.58 ms |
+| Total Scan Loop Duration | 3480.58 ms | 4066.92 ms |
+| Process Telemetry Collection | 153.02 ms | 183.55 ms |
+| Network Connections Collection | 99.06 ms | 118.56 ms |
+| Scoring, Fusion & Anomaly Engine | 48.12 ms | 58.48 ms |
+| Persistence & Auto-Start Inspection | 22.07 ms | 28.58 ms |
+| System Resource Telemetry Collection | 14.51 ms | 18.57 ms |
 
 ## System Overhead
 
-- **Average Host CPU Utilization:** `15.15%` (P95: `28.47%`)
-- **Average Host Memory Utilization:** `86.15%` (P95: `90.87%`)
+- **Average Host CPU Utilization:** `15.03%` (P95: `28.41%`)
+- **Average Host Memory Utilization:** `86.35%` (P95: `91.60%`)
 - **Agent Footprint:** Minimal CPU footprint (< 1-2% agent-specific load) during background scan cycles.
 
 ## Optimization Note
