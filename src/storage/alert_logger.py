@@ -10,6 +10,8 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+import requests
+
 from src.privacy.redaction import redact_command_line
 from src.storage.siem_exporter import export_to_siem
 
@@ -102,6 +104,20 @@ def log_alert(
         resolved_port = int(siem_port or cfg.get('siem_port', 514))
         resolved_proto = str(siem_protocol or cfg.get('siem_protocol', 'udp'))
 
+        # Forward to Central FastAPI Cloud Backend if enterprise_mode and api_base_url configured
+        api_base_url = str(cfg.get('api_base_url') or '').strip().rstrip('/')
+        if enterprise_enabled and api_base_url:
+            try:
+                requests.post(
+                    f"{api_base_url}/api/alerts",
+                    json=alert_record,
+                    timeout=2.5,
+                )
+            except requests.exceptions.RequestException as req_exc:
+                print(f"Warning: Cloud API alert dispatch failed ({api_base_url}): {req_exc}", file=sys.stderr)
+            except Exception as api_exc:
+                print(f"Warning: Unexpected error dispatching alert to Cloud API: {api_exc}", file=sys.stderr)
+
         # Determine whether to forward to SIEM
         should_export = False
         if siem_export is True:
@@ -121,8 +137,8 @@ def log_alert(
                 protocol=resolved_proto,
             )
     except Exception as exc:
-        # Never crash or fail local logging due to SIEM export issues
-        print(f'Warning: SIEM export dispatch error: {exc}', file=sys.stderr)
+        # Never crash or fail local logging due to SIEM or API export issues
+        print(f'Warning: Alert dispatch error: {exc}', file=sys.stderr)
 
     return file_success
 

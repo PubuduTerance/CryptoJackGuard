@@ -3,12 +3,38 @@ import csv
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+import subprocess
+import sys
+import time
+from typing import Any, Dict, List, Optional, Union
 from time import monotonic, perf_counter
 
 import plotly.express as px
+import requests
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
+
+
+def ensure_backend_is_running(api_base_url: str = "http://127.0.0.1:8000") -> None:
+    """Detect if FastAPI backend is responsive, silently starting it in the background if offline."""
+    url = f"{api_base_url.rstrip('/')}/api/status"
+    try:
+        resp = requests.get(url, timeout=1.0)
+        if resp.status_code == 200:
+            return
+    except Exception:
+        pass
+
+    try:
+        subprocess.Popen(
+            [sys.executable, "-m", "uvicorn", "src.backend.main:app", "--host", "127.0.0.1", "--port", "8000"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        time.sleep(2)
+    except Exception as exc:
+        print(f"Warning: Could not auto-start backend server: {exc}", file=sys.stderr)
+
 
 from src.collectors.network_collector import collect_network_info
 from src.collectors.persistence_collector import PersistenceInspectionCache, apply_persistence_findings
@@ -84,8 +110,42 @@ def _format_reasons(reasons: Any) -> str:
     return 'N/A'
 
 
-def load_recent_alerts(limit: int = 10) -> List[Dict[str, Any]]:
+def load_recent_alerts(
+    limit: int = 10,
+    token: Optional[str] = None,
+    api_base_url: Optional[str] = None,
+) -> List[Dict[str, Any]]:
     alerts: List[Dict[str, Any]] = []
+
+    # 1. Fetch from Centralized Cloud FastAPI backend if authenticated
+    if token:
+        base_url = (api_base_url or "http://127.0.0.1:8000").rstrip("/")
+        try:
+            res = requests.get(
+                f"{base_url}/api/alerts",
+                headers={"Authorization": f"Bearer {token}"},
+                params={"limit": limit},
+                timeout=3.0,
+            )
+            if res.status_code == 200:
+                raw_alerts = res.json().get("alerts", [])
+                for record in raw_alerts:
+                    details = record.get("details") or {}
+                    alerts.append({
+                        'Timestamp': record.get('timestamp', 'N/A'),
+                        'PID': record.get('pid', 'N/A'),
+                        'Name': record.get('process_name') or record.get('name', 'N/A'),
+                        'Score': record.get('risk_score') or record.get('score', 'N/A'),
+                        'Action': record.get('action_taken') or record.get('response_action') or 'alert',
+                        'Path': details.get('path', 'N/A'),
+                        'Reasons': _format_reasons(details.get('reasons') or record.get('reasons')),
+                    })
+                if alerts:
+                    return alerts[:limit]
+        except Exception:
+            pass
+
+    # 2. Fallback to local alerts.jsonl log
     if not ALERTS_LOG.exists():
         return alerts
 
@@ -581,19 +641,70 @@ def run_dashboard_scan(
 
 
 def main() -> None:
+    config = load_config()
+    api_base_url = str(config.get('api_base_url') or 'http://127.0.0.1:8000').rstrip('/')
+
+    # Automatically ensure FastAPI cloud backend is active
+    ensure_backend_is_running(api_base_url)
+
     st.set_page_config(
-        page_title='CryptoJackGuard v1.2 Advanced Dashboard',
+        page_title='CryptoJackGuard Enterprise Dashboard',
         layout='wide',
         initial_sidebar_state='expanded',
     )
 
 
-    st.markdown('# CryptoJackGuard v1.2 Advanced Dashboard')
-    st.markdown('### Real-Time Cryptojacking Detection Dashboard')
+    # -----------------------------------------------------------------------
+    # 1. Enterprise Authentication Check
+    # -----------------------------------------------------------------------
+    if not st.session_state.get('token'):
+        st.markdown(
+            """
+            <div style="text-align: center; margin-top: 30px; margin-bottom: 25px;">
+                <h1>🛡️ CryptoJackGuard Enterprise Portal</h1>
+                <p style="color: #9aa0a6; font-size: 1.1rem;">
+                    Centralized Cryptojacking Defense & Cloud Telemetry Center
+                </p>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        col1, col2, col3 = st.columns([1, 1.5, 1])
+        with col2:
+            with st.form('enterprise_login_form'):
+                st.subheader('Sign In')
+                username = st.text_input('Username', value='admin', key='login_username')
+                password = st.text_input('Password', type='password', key='login_password')
+                submit_btn = st.form_submit_button('Authenticate & Open Dashboard', use_container_width=True)
+
+                if submit_btn:
+                    try:
+                        resp = requests.post(
+                            f"{api_base_url}/api/login",
+                            json={"username": username, "password": password},
+                            timeout=5.0,
+                        )
+                        if resp.status_code == 200:
+                            auth_data = resp.json()
+                            st.session_state['token'] = auth_data.get('access_token')
+                            st.session_state['username'] = auth_data.get('username', username)
+                            st.session_state['role'] = auth_data.get('role', 'admin')
+                            st.success('Authentication successful! Loading dashboard...')
+                            st.rerun()
+                        else:
+                            st.error('Invalid credentials. Please check your username and password.')
+                    except requests.exceptions.RequestException as err:
+                        st.error(f'Backend API unreachable at {api_base_url}. Error: {err}')
+        return
+
+    # -----------------------------------------------------------------------
+    # 2. Authenticated Dashboard Interface
+    # -----------------------------------------------------------------------
+    st.markdown('# CryptoJackGuard Enterprise Dashboard')
+    st.markdown('### Real-Time Cryptojacking Detection & Cloud Telemetry')
     st.success('🛡️ System Status: Protected - CryptoJackGuard is actively monitoring.')
     st.markdown('---')
-
-    config = load_config()
 
     time_range_options = [
         ('Last 5 minutes', timedelta(minutes=5)),
@@ -603,6 +714,37 @@ def main() -> None:
         ('All data', None),
     ]
     with st.sidebar:
+        st.markdown(f"**👤 Operator:** `{st.session_state.get('username', 'admin')}`")
+        st.caption(f"Role: {str(st.session_state.get('role', 'admin')).upper()} | Cloud Sync: Connected")
+
+        # PDF Security Report Download
+        user_token = st.session_state.get('token')
+        if user_token:
+            try:
+                rep_res = requests.get(
+                    f"{api_base_url}/api/reports/pdf",
+                    headers={"Authorization": f"Bearer {user_token}"},
+                    timeout=5.0,
+                )
+                if rep_res.status_code == 200 and rep_res.content:
+                    st.download_button(
+                        label="📄 Download Security Report (PDF)",
+                        data=rep_res.content,
+                        file_name="CryptoJackGuard_Report.pdf",
+                        mime="application/pdf",
+                        use_container_width=True,
+                        key="btn_download_security_report_pdf",
+                    )
+            except Exception:
+                pass
+
+        if st.button('🚪 Logout', key='btn_logout', use_container_width=True):
+            st.session_state.pop('token', None)
+            st.session_state.pop('username', None)
+            st.session_state.pop('role', None)
+            st.rerun()
+
+        st.markdown('---')
         st.header('Controls')
         enable_auto = st.checkbox(
             'Enable auto refresh',
@@ -629,6 +771,8 @@ def main() -> None:
             index=2,
             key='metrics_time_range',
         )
+
+
 
     previous_auto_refresh_tick = st.session_state.get('last_auto_refresh_tick')
     should_scan = should_run_dashboard_scan(
@@ -757,7 +901,11 @@ def main() -> None:
     st.markdown('---')
     with st.container():
         st.subheader('Recent alerts')
-        alert_items = load_recent_alerts(10)
+        alert_items = load_recent_alerts(
+            10,
+            token=st.session_state.get('token'),
+            api_base_url=api_base_url,
+        )
         if not alert_items:
             st.info('No recent suspicious activity.')
         else:

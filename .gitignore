@@ -21,3 +21,6 @@ CryptoJackGuard.rar
 
 # Runtime / research logs
 logs/
+
+# Environment secrets
+.env

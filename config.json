@@ -59,5 +59,6 @@
   ],
   "enterprise_mode": true,
   "siem_host": "127.0.0.1",
-  "siem_port": 514
+  "siem_port": 514,
+  "api_base_url": "http://127.0.0.1:8000"
 }
