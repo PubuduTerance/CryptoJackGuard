@@ -36,6 +36,7 @@ def ensure_backend_is_running(api_base_url: str = "http://127.0.0.1:8000") -> No
         print(f"Warning: Could not auto-start backend server: {exc}", file=sys.stderr)
 
 
+from src.backend.report_generator import generate_security_report
 from src.collectors.network_collector import collect_network_info
 from src.collectors.persistence_collector import PersistenceInspectionCache, apply_persistence_findings
 from src.collectors.process_collector import collect_processes
@@ -717,31 +718,31 @@ def main() -> None:
         st.markdown(f"**👤 Operator:** `{st.session_state.get('username', 'admin')}`")
         st.caption(f"Role: {str(st.session_state.get('role', 'admin')).upper()} | Cloud Sync: Connected")
 
-        # PDF Security Report Download
-        user_token = st.session_state.get('token')
-        if user_token:
-            try:
-                rep_res = requests.get(
-                    f"{api_base_url}/api/reports/pdf",
-                    headers={"Authorization": f"Bearer {user_token}"},
-                    timeout=5.0,
-                )
-                if rep_res.status_code == 200 and rep_res.content:
-                    st.download_button(
-                        label="📄 Download Security Report (PDF)",
-                        data=rep_res.content,
-                        file_name="CryptoJackGuard_Report.pdf",
-                        mime="application/pdf",
-                        use_container_width=True,
-                        key="btn_download_security_report_pdf",
-                    )
-            except Exception:
-                pass
+        # PDF Security Report Download (Optimized with In-Memory Session State Cache)
+        if "report_filename" not in st.session_state:
+            time_str = datetime.now().strftime('%Y%m%d_%H%M%S')
+            st.session_state.report_filename = f"CryptoJackGuard_Report_{time_str}.pdf"
+
+        if "pdf_data" not in st.session_state:
+            initial_alerts = load_recent_alerts(20, token=st.session_state.get('token'), api_base_url=api_base_url)
+            st.session_state.pdf_data = generate_security_report(alerts=initial_alerts, output_path=None)
+
+        st.sidebar.download_button(
+            label="📄 Download Security Report (PDF)",
+            data=st.session_state.pdf_data,
+            file_name=st.session_state.report_filename,
+            mime="application/pdf",
+            use_container_width=True,
+            key="btn_download_pdf_report_fixed",
+        )
 
         if st.button('🚪 Logout', key='btn_logout', use_container_width=True):
             st.session_state.pop('token', None)
             st.session_state.pop('username', None)
             st.session_state.pop('role', None)
+            st.session_state.pop('pdf_data', None)
+            st.session_state.pop('report_filename', None)
+            st.session_state.pop('last_scan', None)
             st.rerun()
 
         st.markdown('---')
@@ -803,6 +804,23 @@ def main() -> None:
             ml_model,
         )
         st.session_state['last_scan'] = scan_state
+
+        # Update in-memory cached PDF with latest scan metrics and alerts
+        try:
+            live_res = scan_state.get('resource')
+            sys_metrics = {
+                'cpu_percent': getattr(live_res, 'cpu_percent', 0.0),
+                'memory_percent': getattr(live_res, 'memory_percent', 0.0),
+                'gpu_percent': getattr(live_res, 'gpu_percent', 0.0),
+            }
+            recent_alerts = load_recent_alerts(25, token=st.session_state.get('token'), api_base_url=api_base_url)
+            st.session_state.pdf_data = generate_security_report(
+                alerts=recent_alerts,
+                output_path=None,
+                system_metrics=sys_metrics,
+            )
+        except Exception:
+            pass
     else:
         scan_state = st.session_state['last_scan']
 

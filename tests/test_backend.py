@@ -124,6 +124,28 @@ class TestReportGenerator(unittest.TestCase):
             self.assertTrue(os.path.exists(result_path))
             self.assertGreater(os.path.getsize(result_path), 500)
 
+    def test_generate_security_report_bytes(self):
+        from src.backend.report_generator import generate_security_report
+
+        alerts = [
+            {
+                "timestamp": "2026-08-26T04:00:00Z",
+                "process_name": "xmrig.exe",
+                "pid": 5432,
+                "risk_score": 90.0,
+                "action_taken": "Terminated",
+                "details": {"reasons": ["Mining IOC detected", "High CPU"]},
+            }
+        ]
+        pdf_bytes = generate_security_report(
+            alerts,
+            output_path=None,
+            system_metrics={"cpu_percent": 75.5, "memory_percent": 42.0},
+        )
+        self.assertIsInstance(pdf_bytes, bytes)
+        self.assertGreater(len(pdf_bytes), 500)
+        self.assertTrue(pdf_bytes.startswith(b"%PDF-"))
+
 
 if __name__ == "__main__":
     unittest.main()

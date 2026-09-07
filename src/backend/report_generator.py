@@ -63,20 +63,19 @@ def _extract_record_dict(alert: Union[Dict[str, Any], Any]) -> Dict[str, Any]:
 
 def generate_security_report(
     alerts: List[Any],
-    output_path: Union[Path, str] = "security_report.pdf",
-) -> str:
+    output_path: Optional[Union[Path, str]] = None,
+    system_metrics: Optional[Dict[str, Any]] = None,
+) -> Union[str, bytes]:
     """Generate a comprehensive enterprise PDF security report for CryptoJackGuard.
 
     Args:
         alerts: List of AlertRecord model instances or alert dictionaries.
-        output_path: Target PDF file destination.
+        output_path: Target PDF file destination (if None, returns in-memory bytes).
+        system_metrics: Optional dictionary containing live CPU, memory, GPU metrics.
 
     Returns:
-        String path of the generated PDF report.
+        String path of the generated PDF report, or raw bytes if output_path is None.
     """
-    resolved_path = Path(output_path)
-    resolved_path.parent.mkdir(parents=True, exist_ok=True)
-
     normalized_alerts = [_extract_record_dict(a) for a in alerts]
     total_alerts = len(normalized_alerts)
     high_risk_count = sum(1 for a in normalized_alerts if float(a.get("risk_score") or a.get("score") or 0.0) >= 60.0)
@@ -111,12 +110,21 @@ def generate_security_report(
     card_height = 18
     y_start = pdf.get_y()
 
-    cards = [
-        ("Total Events", str(total_alerts), (245, 247, 250)),
-        ("High-Risk Alerts", str(high_risk_count), (255, 243, 243) if high_risk_count > 0 else (245, 247, 250)),
-        ("Mitigations Executed", str(mitigations_count), (243, 249, 244) if mitigations_count > 0 else (245, 247, 250)),
-        ("Average Risk Score", f"{avg_score:.1f}/100", (245, 247, 250)),
-    ]
+    metrics = system_metrics or {}
+    if metrics:
+        cards = [
+            ("CPU / Memory Usage", f"{metrics.get('cpu_percent', 0.0):.1f}% / {metrics.get('memory_percent', 0.0):.1f}%", (245, 247, 250)),
+            ("High-Risk Alerts", str(high_risk_count), (255, 243, 243) if high_risk_count > 0 else (245, 247, 250)),
+            ("Mitigations Executed", str(mitigations_count), (243, 249, 244) if mitigations_count > 0 else (245, 247, 250)),
+            ("Average Risk Score", f"{avg_score:.1f}/100", (245, 247, 250)),
+        ]
+    else:
+        cards = [
+            ("Total Events", str(total_alerts), (245, 247, 250)),
+            ("High-Risk Alerts", str(high_risk_count), (255, 243, 243) if high_risk_count > 0 else (245, 247, 250)),
+            ("Mitigations Executed", str(mitigations_count), (243, 249, 244) if mitigations_count > 0 else (245, 247, 250)),
+            ("Average Risk Score", f"{avg_score:.1f}/100", (245, 247, 250)),
+        ]
 
     for idx, (label, val, fill_rgb) in enumerate(cards):
         x_pos = 12 + (idx * (card_width + 4))
@@ -209,10 +217,14 @@ def generate_security_report(
             pdf.cell(43, 6, reasons_str, border=1, fill=fill)
             pdf.ln()
 
-    # Save output PDF
-    pdf.output(str(resolved_path))
-    print(f"[+] Security report PDF generated successfully: {resolved_path}")
-    return str(resolved_path)
+    # Output PDF: return bytes if output_path is None, else write to file
+    if output_path is not None:
+        resolved_path = Path(output_path)
+        resolved_path.parent.mkdir(parents=True, exist_ok=True)
+        pdf.output(str(resolved_path))
+        return str(resolved_path)
+
+    return bytes(pdf.output())
 
 
 if __name__ == "__main__":
